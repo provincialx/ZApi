@@ -22,6 +22,7 @@ import {
   logRaw,
 } from "../logger/index.js";
 import crypto from "crypto";
+import { applyToolPrompt, parseToolCallJson } from "./toolUtils.js";
 import {
   CHAT_API_URL,
   CREATE_CHAT_URL,
@@ -521,9 +522,10 @@ function buildPayloadV2(
       `System message: ${systemMessage.substring(0, 100)}${systemMessage.length > 100 ? "..." : ""}`,
     );
   }
+  // Qwen Chat web API does not support OpenAI native tool schemas.
+  // We emulate it by injecting instructions directly into the system message.
   if (tools && Array.isArray(tools) && tools.length > 0) {
-    payload.tools = tools;
-    payload.tool_choice = toolChoice || "auto";
+    systemMessage = applyToolPrompt(systemMessage, tools);
   }
 
   return payload;
@@ -1262,15 +1264,32 @@ export async function sendMessage(
       // Fallback: если поток чанков не был отдан, отправляем контент единым куском.
       if (
         typeof onChunk === "function" &&
-        response.data.choices?.[0]?.message?.content &&
-        !response.hasStreamedChunks
+        response.data.choices?.[0]?.message?.content
       ) {
         onChunk(response.data.choices[0].message.content);
       }
 
-      return response.data;
-    }
+      // Post-process: Qwen Chat returns tool calls as JSON text, not native API format.
+	  // Convert text-based JSON into OpenAI-style message.tool_calls for agent loop.
+	  const content = response.data.choices?.[0]?.message?.content;
+	  if (typeof content === "string") {
+	    const parsedCalls = parseToolCallJson(content);
+	    if (parsedCalls && parsedCalls.length > 0) {
+	      logInfo(
+	        `Инструменты найдены в ответе Qwen: ${parsedCalls.map((c) => c.function.name).join(", ")}`,
+	      );
+	      response.data.choices[0].message = {
+	        role: "assistant",
+	        content: null,
+	        tool_calls: parsedCalls
+	          .map(({ index, ...call }) => call)
+	          .sort((a, b) => a.index - b.index),
+		      response.data.choices[0].finish_reason = "tool_calls";
+		    }
+	  }
 
+    return response.data;
+  } else {
     const apiResult = await handleApiError(
       response,
       tokenObj,
@@ -1286,7 +1305,6 @@ export async function sendMessage(
       onChunk,
     );
 
-    // Qwen удалил старый чат — попробуй ещё раз с новым.
     if (
       retryCount === 0 &&
       response.errorBody &&
@@ -1315,17 +1333,18 @@ export async function sendMessage(
       }
     }
     return apiResult;
-  } catch (error) {
-    logError("Ошибка при отправке сообщения", error);
-    return { error: error.toString(), chatId };
-  } finally {
-    if (page) {
-      pagePool.releasePage(page);
-    }
+  }
+} catch (error) {
+  logError("Ошибка при отправке сообщения", error);
+  return { error: error.toString(), chatId };
+} finally {
+  if (page) {
+    pagePool.releasePage(page);
   }
 }
+}
 
-// ─── Task response helpers ───────────────────────────────────────────────────
+// ─── Task response helpers
 
 function extractTaskId(data) {
   const firstMsg = data.data?.messages?.[0];
