@@ -1262,26 +1262,6 @@ export async function sendMessage(
         onChunk(response.data.choices[0].message.content);
       }
 
-      // Post-process: Qwen Chat returns tool calls as JSON text, not native API format.
-      // Convert text-based JSON into OpenAI-style message.tool_calls for agent loop.
-      const content = response.data.choices?.[0]?.message?.content;
-      if (typeof content === "string" && content.trim().length > 0) {
-        const parsedCalls = parseToolCallJson(content);
-        if (parsedCalls && parsedCalls.length > 0) {
-          logInfo(
-            `Инструменты найдены в ответе Qwen: ${parsedCalls.map((c) => c.function.name).join(", ")}`,
-          );
-          response.data.choices[0].message = {
-            role: "assistant",
-            content: null,
-            tool_calls: parsedCalls
-              .map(({ index, ...call }) => call)
-              .sort((a, b) => a.index - b.index),
-          };
-          response.data.choices[0].finish_reason = "tool_calls";
-        }
-      }
-
       return response.data;
     } else {
       const apiResult = await handleApiError(
