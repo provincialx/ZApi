@@ -1339,10 +1339,21 @@ router.post("/chat/completions", async (req, res) => {
         `System message: ${systemMessage.substring(0, 50)}${systemMessage.length > 50 ? "..." : ""}`,
       );
 
+    // Detect agent-loop: history has tool results — use lightweight prompt to prevent infinite tool loops.
+    // When Qwen already executed tools and got results, aggressive "CALL A TOOL" rules make it call
+    // more tools instead of synthesizing a text answer. Light prompt keeps parsing ability but drops coercive rules.
+    const inAgentLoop = hasOpenAIToolState(messages);
+    if (inAgentLoop) {
+      logInfo(
+        `🔁 Agent-loop detected — tool history present, using light tool prompt`,
+      );
+    }
+
     const qwenTools = null; // Qwen Chat web API не умеет OpenAI tool schemas; эмулируем через JSON prompt ниже.
     const toolAwareSystemMessage = applyToolPrompt(
       systemMessage,
       combinedTools,
+      inAgentLoop,
     );
 
     if (toolAwareSystemMessage) {
@@ -1813,10 +1824,24 @@ router.post("/v1/chat/completions", async (req, res) => {
       );
     }
 
+    // Detect agent-loop: when history already has tool results, use lighter prompt
+    // to prevent model from being coerced into another unnecessary tool call
+    const inAgentLoop = hasOpenAIToolState(messages);
+    if (
+      inAgentLoop &&
+      Array.isArray(combinedTools) &&
+      combinedTools.length > 0
+    ) {
+      logInfo(
+        `🔁 Agent-loop: history has tool state — using light tool prompt to break infinite loops`,
+      );
+    }
+
     const qwenTools = null; // Qwen Chat web API не умеет OpenAI tool schemas; эмулируем через JSON prompt ниже.
     const toolAwareSystemMessage = applyToolPrompt(
       systemMessage,
       combinedTools,
+      inAgentLoop,
     );
     if (toolAwareSystemMessage) {
       logInfo(
