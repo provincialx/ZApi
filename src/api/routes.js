@@ -509,7 +509,8 @@ function buildStatelessTranscript(messages) {
       const text = stringifyOpenAIContent(msg.content);
       if (text) parts.push(`Assistant: ${text}`);
       if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-        parts.push(`Assistant tool calls: ${JSON.stringify(msg.tool_calls)}`);
+        const actions = msg.tool_calls.map(tc => tc?.function?.name || tc?.name).join(", ");
+        parts.push(`Assistant used tools: ${actions}`);
       }
     } else if (msg.role === "tool") {
       const name = msg.name || msg.tool_call_id || "tool";
