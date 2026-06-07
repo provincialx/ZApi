@@ -55,45 +55,45 @@ const idempotencyCache = new Map();
 const IDEM_CACHE_TTL_MS = 5000;
 
 function getIdempotencyKey(messages, chatId) {
-	if (!Array.isArray(messages) || messages.length === 0) return null;
-	const lastUser = [...messages].reverse().find((m) => m.role === "user");
-	if (!lastUser) return null;
-	let contentStr = "";
-	if (typeof lastUser.content === "string") {
-		contentStr = lastUser.content.substring(0, 200);
-	} else if (Array.isArray(lastUser.content)) {
-		const texts = lastUser.content.filter((x) => x.type === "text").map((x) => x.text || "");
-		contentStr = texts.join("").substring(0, 200);
-	}
-	if (!contentStr) return null;
-	const contentHash = crypto.createHash("md5").update(contentStr).digest("hex");
-	return `idemp::${chatId || "none"}::${contentHash}`;
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  if (!lastUser) return null;
+  let contentStr = "";
+  if (typeof lastUser.content === "string") {
+    contentStr = lastUser.content.substring(0, 200);
+  } else if (Array.isArray(lastUser.content)) {
+    const texts = lastUser.content
+      .filter((x) => x.type === "text")
+      .map((x) => x.text || "");
+    contentStr = texts.join("").substring(0, 200);
+  }
+  if (!contentStr) return null;
+  const contentHash = crypto.createHash("md5").update(contentStr).digest("hex");
+  return `idemp::${chatId || "none"}::${contentHash}`;
 }
 
 function getCachedResult(key) {
-	if (!key) return null;
-	const entry = idempotencyCache.get(key);
-	if (!entry) return null;
-	if (Date.now() - entry.timestamp > IDEM_CACHE_TTL_MS) {
-		idempotencyCache.delete(key);
-		return null;
-	}
-	logInfo(`⚡️ Idempotency hit: returning cached result`);
-	return entry.result;
+  if (!key) return null;
+  const entry = idempotencyCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > IDEM_CACHE_TTL_MS) {
+    idempotencyCache.delete(key);
+    return null;
+  }
+  logInfo(`⚡️ Idempotency hit: returning cached result`);
+  return entry.result;
 }
 
 function cacheResult(key, result) {
-	if (!key || !result) return;
-	idempotencyCache.set(key, { result, timestamp: Date.now() });
-	if (idempotencyCache.size > 1000) {
-		const now = Date.now();
-		for (const [k, v] of idempotencyCache) {
-			if (now - v.timestamp > IDEM_CACHE_TTL_MS) idempotencyCache.delete(k);
-		}
-	}
+  if (!key || !result) return;
+  idempotencyCache.set(key, { result, timestamp: Date.now() });
+  if (idempotencyCache.size > 1000) {
+    const now = Date.now();
+    for (const [k, v] of idempotencyCache) {
+      if (now - v.timestamp > IDEM_CACHE_TTL_MS) idempotencyCache.delete(k);
+    }
+  }
 }
-
-
 
 // Функция для генерирования детерминированного chatId на основе истории
 function generateChatIdFromHistory(messages) {
@@ -554,14 +554,20 @@ function buildStatelessTranscript(messages) {
       const text = stringifyOpenAIContent(msg.content);
       if (text) parts.push(`Assistant: ${text}`);
       if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-        const actions = msg.tool_calls.map(tc => tc?.function?.name || tc?.name).join(", ");
+        const actions = msg.tool_calls
+          .map((tc) => tc?.function?.name || tc?.name)
+          .join(", ");
         parts.push(`Assistant used tools: ${actions}`);
       }
     } else if (msg.role === "tool") {
       const name = msg.name || msg.tool_call_id || "tool";
-      parts.push(
-        `Tool result (${name}): ${stringifyOpenAIContent(msg.content)}`,
-      );
+      const toolResult = stringifyOpenAIContent(msg.content);
+      // Label failed executions clearly so Qwen doesn't mirror error text
+      if (isToolFailure(toolResult)) {
+        parts.push(`Tool ${name} was not available.`);
+      } else {
+        parts.push(`Tool result (${name}): ${toolResult}`);
+      }
     } else {
       parts.push(
         `${msg.role || "message"}: ${stringifyOpenAIContent(msg.content)}`,
@@ -569,6 +575,36 @@ function buildStatelessTranscript(messages) {
     }
   }
   return parts.join("\n\n");
+}
+
+// Check if a single tool result indicates execution failure
+function isToolFailure(content) {
+  if (typeof content !== "string" || !content.trim()) return false;
+  const patterns = [
+    /does not exist/i,
+    /not found/i,
+    /unavailable/i,
+    /not supported/i,
+    /is not available/i,
+    /unknown tool/i,
+    /invalid tool/i,
+    /no such tool/i,
+  ];
+  return patterns.some((p) => p.test(content));
+}
+
+// Check if all tool results indicate failure — when every call failed, injecting
+// more tool prompts makes Qwen hallucinate identical error text instead of JSON
+// or natural answers. Skip injection to let the model respond naturally.
+function areAllToolsFailed(messages) {
+  const toolMessages = (messages || []).filter(
+    (msg) => msg?.role === "tool" || msg?.role === "function",
+  );
+  if (toolMessages.length === 0) return false;
+  return toolMessages.every((msg) => {
+    const content = stringifyOpenAIContent(msg.content);
+    return isToolFailure(content);
+  });
 }
 
 function hasOpenAIToolState(messages) {
@@ -1392,18 +1428,24 @@ router.post("/chat/completions", async (req, res) => {
     // When Qwen already executed tools and got results, aggressive "CALL A TOOL" rules make it call
     // more tools instead of synthesizing a text answer. Light prompt keeps parsing ability but drops coercive rules.
     const inAgentLoop = hasOpenAIToolState(messages);
-    if (inAgentLoop) {
+
+    // When every tool call failed ("does not exist", etc.), skip injection entirely
+    // — Qwen mirrors error text creating hallucination loop. Let it answer naturally instead.
+    const allFailed = areAllToolsFailed(messages);
+    if (allFailed) {
+      logInfo(
+        `🗑 All tools failed in history — skipping tool prompt to break hallucination loop`,
+      );
+    } else if (inAgentLoop) {
       logInfo(
         `🔁 Agent-loop detected — tool history present, using light tool prompt`,
       );
     }
 
     const qwenTools = null; // Qwen Chat web API не умеет OpenAI tool schemas; эмулируем через JSON prompt ниже.
-    const toolAwareSystemMessage = applyToolPrompt(
-      systemMessage,
-      combinedTools,
-      inAgentLoop,
-    );
+    const toolAwareSystemMessage = allFailed
+      ? systemMessage
+      : applyToolPrompt(systemMessage, combinedTools, inAgentLoop);
 
     if (toolAwareSystemMessage) {
       logInfo(
@@ -1485,10 +1527,37 @@ router.post("/chat/completions", async (req, res) => {
         const cachedResult = getCachedResult(idemKey);
         if (cachedResult) {
           logInfo(`⚡️ Returning deduplicated response for streaming request`);
-          writeSse({ id: "chatcmpl-stream", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: mappedModel || "qwen-max-latest", choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
+          writeSse({
+            id: "chatcmpl-stream",
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: mappedModel || "qwen-max-latest",
+            choices: [
+              { index: 0, delta: { role: "assistant" }, finish_reason: null },
+            ],
+          });
           const cachedContent = cachedResult.choices?.[0]?.message?.content;
-          if (cachedContent) writeSse({ id: "chatcmpl-stream", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: mappedModel || "qwen-max-latest", choices: [{ index: 0, delta: { content: cachedContent }, finish_reason: null }] });
-          writeSse({ id: "chatcmpl-stream", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: mappedModel || "qwen-max-latest", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+          if (cachedContent)
+            writeSse({
+              id: "chatcmpl-stream",
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: mappedModel || "qwen-max-latest",
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: cachedContent },
+                  finish_reason: null,
+                },
+              ],
+            });
+          writeSse({
+            id: "chatcmpl-stream",
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: mappedModel || "qwen-max-latest",
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          });
           res.write("data: [DONE]\\n\\n");
           res.end();
           return;
@@ -1904,7 +1973,15 @@ router.post("/v1/chat/completions", async (req, res) => {
     // Detect agent-loop: when history already has tool results, use lighter prompt
     // to prevent model from being coerced into another unnecessary tool call
     const inAgentLoop = hasOpenAIToolState(messages);
-    if (
+
+    // When every tool call failed ("does not exist", etc.), skip injection entirely
+    // — Qwen mirrors error text creating hallucination loop. Let it answer naturally instead.
+    const allFailed = areAllToolsFailed(messages);
+    if (allFailed) {
+      logInfo(
+        `🗑 All tools failed in history — skipping tool prompt to break hallucination loop`,
+      );
+    } else if (
       inAgentLoop &&
       Array.isArray(combinedTools) &&
       combinedTools.length > 0
@@ -1915,11 +1992,9 @@ router.post("/v1/chat/completions", async (req, res) => {
     }
 
     const qwenTools = null; // Qwen Chat web API не умеет OpenAI tool schemas; эмулируем через JSON prompt ниже.
-    const toolAwareSystemMessage = applyToolPrompt(
-      systemMessage,
-      combinedTools,
-      inAgentLoop,
-    );
+    const toolAwareSystemMessage = allFailed
+      ? systemMessage
+      : applyToolPrompt(systemMessage, combinedTools, inAgentLoop);
     if (toolAwareSystemMessage) {
       logInfo(
         `System message: ${toolAwareSystemMessage.substring(0, 50)}${toolAwareSystemMessage.length > 50 ? "..." : ""}`,
