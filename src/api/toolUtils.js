@@ -201,10 +201,11 @@ export function toolsToLightPrompt(tools) {
 
   return `
 
-TOOL CALLING ADAPTER (LIGHT MODE — results already available).
+TOOL CALLING ADAPTER.
 You have received results from prior tool calls. Use these results to form your answer.
-Available tools if further action needed: ${toolNames}
-To call another tool, respond with minified JSON (no markdown):
+If further action is needed (e.g., more files to read, commands to run, verification), YOU MUST call a tool immediately.
+Available tools: ${toolNames}
+To call another tool, respond with minified JSON on the LAST line:
 {"tool_calls":[{"name":"tool_name","arguments":{}}]}
-Prefer natural language answer when you have enough information.`;
+Only answer in text if you have ALL needed information and no further actions are required.`;
 }
