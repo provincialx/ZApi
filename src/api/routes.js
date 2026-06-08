@@ -48,6 +48,9 @@ import {
   prepareOpenAIMessageInput,
 } from "./openaiUtils.js";
 
+// ─── Project Context (anti-hallucination) ───────────────────────────────────
+import { buildAuditContext } from "./projectContext.js";
+
 // ─── Response Builders (streaming, tool calls SSE) ─────────────────────────
 import {
   buildOpenAIToolResponse,
@@ -248,9 +251,19 @@ router.post("/chat/completions", async (req, res) => {
     }
 
     const qwenTools = null; // Qwen Chat web API не умеет OpenAI tool schemas
-    const toolAwareSystemMessage = allFailed
+    let finalSystemMessage = allFailed
       ? systemMessage
       : applyToolPrompt(systemMessage, combinedTools, inAgentLoop);
+
+    // Inject актуальное состояние проекта при запросах аудита.
+    // Предотвращает галлюцинации из training data — модель видит реальную структуру.
+    const auditContext = buildAuditContext(messages);
+    if (auditContext) {
+      finalSystemMessage = `${finalSystemMessage || ""}
+
+${auditContext}`.trim();
+      logInfo(`📂 Audit request detected — injected real project context`);
+    }
 
     // Сворачиваем историю, чтобы не превращать консоль в "потрошное месиво" при agent-loop (tool_calls)
     const roleCounts = {};
@@ -370,7 +383,7 @@ router.post("/chat/completions", async (req, res) => {
           files,
           qwenTools,
           tool_choice,
-          toolAwareSystemMessage,
+          finalSystemMessage,
           streamingCallback,
         );
 
@@ -529,7 +542,7 @@ router.post("/chat/completions", async (req, res) => {
         null, // files
         qwenTools,
         tool_choice,
-        toolAwareSystemMessage,
+        finalSystemMessage,
       );
 
       // Сохраняем chatId в сессию для следующих запросов
