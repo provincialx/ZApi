@@ -1,9 +1,9 @@
 # FreeQwenApi — ForgetMeAI fork
 
-> **Локальный OpenAI-compatible прокси к Qwen Chat** от [t.me/forgetmeai](https://t.me/forgetmeai).  
+> **Локальный OpenAI-compatible прокси к Qwen Chat**. Контакты: `mandrykinsergey@gmail.com` | [twitch.tv/dnovitv](https://www.twitch.tv/dnovitv)
 > Текст, модели Qwen 3.7, файлы, Open WebUI, генерация изображений и видео через Qwen Chat.
 
-![ForgetMeAI](https://img.shields.io/badge/ForgetMeAI-t.me%2Fforgetmeai-blue)
+![Contact](https://img.shields.io/badge/Contact-mandrykinsergey@-blue)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-green)
 ![Qwen](https://img.shields.io/badge/Qwen-Chat-purple)
 
@@ -25,7 +25,7 @@ http://localhost:3264/api
 - **Загрузка файлов**: upload endpoint для файлов и вложений Qwen.
 - **Open WebUI**: можно подключить как OpenAI-compatible backend.
 - **Health/smoke tooling**: `/api/health`, `/api/status`, `/api/models`, `npm run smoke`, `npm run models:sync`.
-- **ForgetMeAI branding**: watermark `t.me/forgetmeai` в README, CLI и health metadata.
+- **Contact info**: watermark с контактами в README, CLI и health metadata.
 
 ## Быстрый старт
 
@@ -92,7 +92,7 @@ curl http://localhost:3264/api/health
 {
   "ok": true,
   "service": "FreeQwenApi",
-  "watermark": "t.me/forgetmeai",
+  "watermark": "mandrykinsergey@gmail.com | twitch.tv/dnovitv",
   "baseUrl": "/api",
   "models": 28
 }
@@ -233,8 +233,6 @@ curl http://localhost:3264/api/models
 - Токены истекают — используйте `npm run auth -- --relogin`.
 - Для production используйте осторожно: это инструмент для экспериментов, демо и локальных workflow.
 
-## От ForgetMeAI
+## Поддержать автора
 
-Если fork помог — подпишитесь: [t.me/forgetmeai](https://t.me/forgetmeai)
-
-Там практичные AI-инструменты, локальные агенты, open-source находки и честные тесты без корпоративной лапши.
+Если проект помог — пишите: `mandrykinsergey@gmail.com` | [twitch.tv/dnovitv](https://www.twitch.tv/dnovitv)
