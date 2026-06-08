@@ -64,8 +64,9 @@ Commit any changes and push to the repository.
 - `STREAMING_CHUNK_DELAY` между чанками.
 
 ## 4. File Responsibilities
-- `src/api/routes.js` — OpenAI-compatible endpoints (`/chat/completions`, `/v1/chat/completions`), sliding window, routing, image/video generation endpoints.
-- `src/api/chat.js` — отправка сообщений в Qwen через Puppeteer, retry-логика, error handling, `evaluateWithTimeout`, page pool.
+- `src/api/routes.js` — OpenAI-compatible endpoints (`/chat/completions`, `/v1/chat/completions`), sliding window, routing.
+- `src/api/qwenApi.js` — отправка сообщений в Qwen через Puppeteer, retry-логика, error handling.
+- `src/api/chat.js` — auth token state, model/key loaders, re-exports from qwenApi.
 - `src/api/toolUtils.js` — **единственное** место для `applyToolPrompt`, `parseToolCallJson`, `toolsToPrompt`, `toolsToLightPrompt`, `truncateForPrompt`, `compactJsonSchema`.
 - `src/browser/browser.js` — инициализация Puppeteer, `protocolTimeout`, stealth-антидетект, ручная авторизация.
 - `src/browser/auth.js` — проверка аутентификации Qwen.
@@ -73,7 +74,6 @@ Commit any changes and push to the repository.
 - `src/api/tokenManager.js` — ротация аккаунтов, статусы (OK, RATELIMIT, INVALID).
 - `src/api/chatHistory.js` — локальное хранение истории (JSON).
 - `src/api/fileUpload.js` — загрузка файлов через STS token + OSS.
-- `src/api/imageGeneration.js` — генерация изображений (DashScope/Qwen).
 - `src/api/modelMapping.js` — маппинг имён моделей.
 - `src/config.js` — константы: таймауты, лимиты, пути, настройки сервера.
 - `src/utils/branding.js` — водяной знак ForgetMeAI.

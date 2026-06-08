@@ -28,102 +28,13 @@ import {
   CHAT_API_URL,
   CREATE_CHAT_URL,
   CHAT_PAGE_URL,
-  TASK_STATUS_URL,
   PAGE_TIMEOUT,
   RETRY_DELAY,
   DEFAULT_MODEL,
   MAX_RETRY_COUNT,
-  TASK_POLL_MAX_ATTEMPTS,
-  TASK_POLL_INTERVAL,
 } from "../config.js";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// ─── Task polling ────────────────────────────────────────────────────────────
-
-export async function pollTaskStatus(
-  taskId,
-  page,
-  token,
-  maxAttempts = TASK_POLL_MAX_ATTEMPTS,
-  interval = TASK_POLL_INTERVAL,
-) {
-  logInfo(`Начинаем опрос статуса задачи: ${taskId}`);
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const statusUrl = `${TASK_STATUS_URL}/${taskId}`;
-
-      const result = await page.evaluate(
-        async (data) => {
-          try {
-            const response = await fetch(data.url, {
-              method: "GET",
-              headers: {
-                Authorization: `Bearer ${data.token}`,
-                Accept: "application/json",
-              },
-            });
-            if (!response.ok) {
-              return {
-                success: false,
-                status: response.status,
-                error: await response.text(),
-              };
-            }
-            return { success: true, data: await response.json() };
-          } catch (e) {
-            return { success: false, error: e.toString() };
-          }
-        },
-        { url: statusUrl, token },
-      );
-
-      if (!result.success) {
-        logWarn(
-          `Ошибка при проверке статуса (попытка ${attempt}/${maxAttempts}): ${result.error}`,
-        );
-        if (attempt < maxAttempts) await delay(interval);
-        continue;
-      }
-
-      const taskData = result.data;
-      const taskStatus = taskData.task_status || taskData.status || "unknown";
-      logDebug(`Статус задачи (${attempt}/${maxAttempts}): ${taskStatus}`);
-
-      if (taskStatus === "completed" || taskStatus === "success") {
-        logInfo("Задача завершена успешно");
-        return { success: true, status: "completed", data: taskData };
-      }
-
-      if (taskStatus === "failed" || taskStatus === "error") {
-        logError("Задача завершилась с ошибкой");
-        return {
-          success: false,
-          status: "failed",
-          error:
-            taskData.error || taskData.message || "Задача завершилась ошибкой",
-          data: taskData,
-        };
-      }
-
-      if (attempt < maxAttempts) await delay(interval);
-    } catch (error) {
-      logError(
-        `Ошибка при опросе задачи (попытка ${attempt}/${maxAttempts})`,
-        error,
-      );
-      if (attempt < maxAttempts) await delay(interval);
-    }
-  }
-
-  logError(`Превышен лимит попыток (${maxAttempts}) для задачи ${taskId}`);
-  return {
-    success: false,
-    status: "timeout",
-    error: "Превышен таймаут polling задачи",
-  };
-}
 
 // ─── sendMessage — helper functions ──────────────────────────────────────────
 
@@ -182,24 +93,9 @@ function buildPayloadV2(
   systemMessage,
   tools,
   toolChoice,
-  chatType = "t2t",
-  size = null,
 ) {
   const userMessageId = crypto.randomUUID();
   const assistantChildId = crypto.randomUUID();
-
-  const isVideo = chatType === "t2v";
-
-  const featureConfig = {
-    thinking_enabled: isVideo,
-    output_schema: "phase",
-  };
-  if (isVideo) {
-    featureConfig.research_mode = "normal";
-    featureConfig.auto_thinking = true;
-    featureConfig.thinking_format = "summary";
-    featureConfig.auto_search = true;
-  }
 
   const newMessage = {
     fid: userMessageId,
@@ -207,19 +103,22 @@ function buildPayloadV2(
     parent_id: parentId,
     role: "user",
     content: messageContent,
-    chat_type: chatType,
-    sub_chat_type: chatType,
+    chat_type: "t2t",
+    sub_chat_type: "t2t",
     timestamp: Math.floor(Date.now() / 1000),
     user_action: "chat",
     models: [model],
     files: files || [],
     childrenIds: [assistantChildId],
-    extra: { meta: { subChatType: chatType } },
-    feature_config: featureConfig,
+    extra: { meta: { subChatType: "t2t" } },
+    feature_config: {
+      thinking_enabled: false,
+      output_schema: "phase",
+    },
   };
 
   const payload = {
-    stream: !isVideo,
+    stream: true,
     incremental_output: true,
     chat_id: chatId,
     chat_mode: "normal",
@@ -228,8 +127,6 @@ function buildPayloadV2(
     parent_id: parentId,
     timestamp: Math.floor(Date.now() / 1000),
   };
-
-  if (size) payload.size = size;
 
   if (systemMessage) {
     payload.system_message = systemMessage;
@@ -646,9 +543,6 @@ async function handleApiError(
   parentId,
   files,
   retryCount,
-  chatType,
-  size,
-  waitForCompletion,
   onChunk = null,
 ) {
   const errMsg =
@@ -703,12 +597,9 @@ async function handleApiError(
         chatId,
         parentId,
         files,
-        null,
-        null,
-        null,
-        chatType,
-        size,
-        waitForCompletion,
+        null, // tools
+        null, // toolChoice
+        null, // systemMessage (cleared on retry — Qwen stores it)
         retryCount + 1,
         onChunk,
       );
@@ -752,12 +643,9 @@ async function handleApiError(
         chatId,
         parentId,
         files,
-        null,
-        null,
-        null,
-        chatType,
-        size,
-        waitForCompletion,
+        null, // tools
+        null, // toolChoice
+        null, // systemMessage
         retryCount + 1,
         onChunk,
       );
@@ -787,16 +675,13 @@ export async function sendMessage(
   tools = null,
   toolChoice = null,
   systemMessage = null,
-  chatType = "t2t",
-  size = null,
-  waitForCompletion = true,
   retryCount = 0,
   onChunk = null,
 ) {
   if (!availableModels) availableModels = getAvailableModelsFromFile();
 
   if (!chatId) {
-    const newChatResult = await createChatV2(model, "Новый чат", 0, chatType);
+    const newChatResult = await createChatV2(model, "Новый чат", 0);
     if (newChatResult.error)
       return { error: "Не удалось создать чат: " + newChatResult.error };
     chatId = newChatResult.chatId;
@@ -819,12 +704,6 @@ export async function sendMessage(
     model = DEFAULT_MODEL;
   }
   logInfo(`Используемая модель: "${model}"`);
-  if (chatType !== "t2t") {
-    const typeLabels = { t2i: "изображение", t2v: "видео" };
-    logInfo(
-      `Тип генерации: ${chatType} (${typeLabels[chatType] || chatType})${size ? `, размер: ${size}` : ""}`,
-    );
-  }
 
   const browserContext = getBrowserContext();
   if (!browserContext) return { error: "Браузер не инициализирован", chatId };
@@ -868,8 +747,6 @@ export async function sendMessage(
       systemMessage,
       tools,
       toolChoice,
-      chatType,
-      size,
     );
     logDebug(
       `Отправка запроса к API v2 (model: ${payload.model}, chat_id: ${payload.chat_id})`,
@@ -887,87 +764,6 @@ export async function sendMessage(
       authToken,
       onChunk,
     );
-
-    if (response.success && response.isTask) {
-      logInfo("Обнаружен ответ с задачей (видеогенерация)");
-
-      const taskId = extractTaskId(response.data);
-      if (!taskId) {
-        logError("Task ID не найден в ответе");
-        pagePool.releasePage(page);
-        page = null;
-        return {
-          error: "Task ID не найден в ответе",
-          chatId,
-          rawResponse: response.data,
-        };
-      }
-
-      logInfo(`Task ID: ${taskId}`);
-
-      if (!waitForCompletion) {
-        logInfo("Возвращаем task_id для клиентского polling");
-        pagePool.releasePage(page);
-        page = null;
-        return {
-          id: taskId,
-          object: "chat.completion.task",
-          created: Math.floor(Date.now() / 1000),
-          model,
-          task_id: taskId,
-          chatId,
-          parentId: response.data.data?.parent_id || taskId,
-          status: "processing",
-          message:
-            "Задача генерации видео создана. Для прогресса используйте GET /api/tasks/status/:taskId.",
-        };
-      }
-
-      logInfo("Начинаем polling для получения видео...");
-      const taskResult = await pollTaskStatus(taskId, page, authToken);
-
-      pagePool.releasePage(page);
-      page = null;
-
-      if (taskResult.success && taskResult.status === "completed") {
-        logInfo("Видео успешно сгенерировано");
-        const videoUrl = extractVideoUrl(taskResult.data);
-        return {
-          id: taskId,
-          object: "chat.completion",
-          created: Math.floor(Date.now() / 1000),
-          model,
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: "assistant",
-                content: videoUrl || JSON.stringify(taskResult.data),
-              },
-              finish_reason: "stop",
-            },
-          ],
-          usage: taskResult.data.usage || {
-            prompt_tokens: 0,
-            output_tokens: 0,
-            total_tokens: 0,
-          },
-          response_id: taskId,
-          chatId,
-          parentId: taskId,
-          task_id: taskId,
-          video_url: videoUrl,
-        };
-      }
-
-      logError(`Не удалось получить видео: ${taskResult.error}`);
-      return {
-        error: taskResult.error || "Video generation failed",
-        status: taskResult.status,
-        chatId,
-        task_id: taskId,
-      };
-    }
 
     pagePool.releasePage(page);
     page = null;
@@ -996,9 +792,6 @@ export async function sendMessage(
         parentId,
         files,
         retryCount,
-        chatType,
-        size,
-        waitForCompletion,
         onChunk,
       );
 
@@ -1006,7 +799,7 @@ export async function sendMessage(
         logWarn(
           `Qwen чат ${chatId} больше не существует. Создаю новый и повторяю запрос...`,
         );
-        const newChatResult = await createChatV2(model, "Сессия", 0, chatType);
+        const newChatResult = await createChatV2(model, "Сессия", 0);
         if (newChatResult && newChatResult.chatId) {
           // Retry with new chat. Mark result so routes knows to update default cache.
           const retryResult = await sendMessage(
@@ -1018,9 +811,6 @@ export async function sendMessage(
             tools,
             toolChoice,
             systemMessage,
-            chatType,
-            size,
-            waitForCompletion,
             1, // prevent infinite retry loop
             onChunk,
           );
@@ -1040,7 +830,7 @@ export async function sendMessage(
         logWarn(
           `Qwen чат ${chatId} заблокирован ("in progress"). Создаю новый и повторяю запрос...`,
         );
-        const newChatResult = await createChatV2(model, "Сессия", 0, chatType);
+        const newChatResult = await createChatV2(model, "Сессия", 0);
         if (newChatResult && newChatResult.chatId) {
           const retryResult = await sendMessage(
             message,
@@ -1051,9 +841,6 @@ export async function sendMessage(
             tools,
             toolChoice,
             systemMessage,
-            chatType,
-            size,
-            waitForCompletion,
             1,
             onChunk,
           );
@@ -1074,119 +861,12 @@ export async function sendMessage(
   }
 }
 
-// ─── Task response helpers
-
-function extractTaskId(data) {
-  const firstMsg = data.data?.messages?.[0];
-  if (firstMsg?.extra?.wanx?.task_id) return firstMsg.extra.wanx.task_id;
-  return (
-    data.id || data.task_id || data.response_id || data.data?.message_id || null
-  );
-}
-
-function findMediaUrl(
-  value,
-  extensions = [".mp4", ".mov", ".webm", ".png", ".jpg", ".jpeg", ".webp"],
-) {
-  if (!value) return null;
-  if (typeof value === "string") {
-    const direct = value
-      .match(/https?:\/\/[^\s"'<>]+/g)
-      ?.find((url) =>
-        extensions.some((ext) => url.toLowerCase().includes(ext)),
-      );
-    return direct || null;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findMediaUrl(item, extensions);
-      if (found) return found;
-    }
-    return null;
-  }
-  if (typeof value === "object") {
-    const preferredKeys = [
-      "video_url",
-      "image_url",
-      "url",
-      "content",
-      "result",
-      "output",
-      "data",
-      "message",
-    ];
-    for (const key of preferredKeys) {
-      if (key in value) {
-        const found = findMediaUrl(value[key], extensions);
-        if (found) return found;
-      }
-    }
-    for (const item of Object.values(value)) {
-      const found = findMediaUrl(item, extensions);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
-export function extractMediaUrl(value, type = "any") {
-  const extensions =
-    type === "video"
-      ? [".mp4", ".mov", ".webm"]
-      : type === "image"
-        ? [".png", ".jpg", ".jpeg", ".webp"]
-        : [".mp4", ".mov", ".webm", ".png", ".jpg", ".jpeg", ".webp"];
-  return findMediaUrl(value, extensions);
-}
-
-function extractVideoUrl(taskData) {
-  return extractMediaUrl(taskData, "video");
-}
-
-export async function pollQwenTaskStatus(taskId, waitForCompletion = false) {
-  const browserContext = getBrowserContext();
-  if (!browserContext)
-    return { error: "Браузер не инициализирован", task_id: taskId };
-
-  const tokenObj = await resolveAuthToken(browserContext);
-  if (!tokenObj?.token)
-    return {
-      error: "Ошибка авторизации: не удалось получить токен",
-      task_id: taskId,
-    };
-
-  let page = null;
-  try {
-    page = await pagePool.getPage(browserContext);
-    const result = waitForCompletion
-      ? await pollTaskStatus(taskId, page, tokenObj.token)
-      : await pollTaskStatus(taskId, page, tokenObj.token, 1, 0);
-
-    const mediaUrl =
-      extractMediaUrl(result.data || result, "video") ||
-      extractMediaUrl(result.data || result, "image");
-    return {
-      task_id: taskId,
-      success: result.success,
-      status: result.status,
-      error: result.error,
-      video_url: extractMediaUrl(result.data || result, "video"),
-      image_url: extractMediaUrl(result.data || result, "image"),
-      media_url: mediaUrl,
-      data: result.data,
-    };
-  } finally {
-    if (page) pagePool.releasePage(page);
-  }
-}
-
 // ─── createChatV2 ────────────────────────────────────────────────────────────
 
 export async function createChatV2(
   model = DEFAULT_MODEL,
   title = "Новый чат",
   retryCount = 0,
-  chatType = "t2t",
 ) {
   const browserContext = getBrowserContext();
   if (!browserContext) return { error: "Браузер не инициализирован" };
@@ -1211,7 +891,7 @@ export async function createChatV2(
       title,
       models: [model],
       chat_mode: "normal",
-      chat_type: chatType,
+      chat_type: "t2t",
       timestamp: Date.now(),
     };
     const requestBody = { apiUrl: CREATE_CHAT_URL, payload, token: authToken };
@@ -1255,7 +935,7 @@ export async function createChatV2(
         `Создание чата: ${result.status}, ретрай ${retryCount + 1}/${MAX_RETRY_COUNT} через ${RETRY_DELAY}мс...`,
       );
       await delay(RETRY_DELAY);
-      return createChatV2(model, title, retryCount + 1, chatType);
+      return createChatV2(model, title, retryCount + 1);
     }
 
     const cleanError = isTransient

@@ -21,14 +21,12 @@ http://localhost:3264/api
 
 - **Chat Completions API**: `POST /api/chat/completions`, совместимый с OpenAI SDK, Open WebUI, LiteLLM и агентами.
 - **Актуальные модели Qwen Chat**: `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus` и другие модели из `src/AvailableModels.txt`.
-- **Генерация изображений через Qwen Chat**: `POST /api/images/generations` без `DASHSCOPE_API_KEY`.
-- **Генерация видео через Qwen Chat**: `POST /api/videos/generations` + polling задач через `GET /api/tasks/status/:taskId`.
 - **Мультиаккаунты**: добавление, перелогин, удаление, статусы `OK` / `WAIT` / `INVALID`, автоматическая round-robin ротация при лимитах.
 - **Загрузка файлов**: upload endpoint для файлов и вложений Qwen.
 - **Open WebUI**: можно подключить как OpenAI-compatible backend.
 - **Hermes Agent / LiteLLM / Claude Code**: готовые примеры конфигов для локальных AI-агентов.
 - **Health/smoke tooling**: `/api/health`, `/api/status`, `/api/models`, `npm run smoke`, `npm run models:sync`.
-- **ForgetMeAI branding**: watermark `t.me/forgetmeai` в README, CLI и health/media metadata.
+- **ForgetMeAI branding**: watermark `t.me/forgetmeai` в README, CLI и health metadata.
 
 ## Быстрый старт
 
@@ -147,93 +145,6 @@ const response = await openai.chat.completions.create({
 console.log(response.choices[0].message.content);
 ```
 
-## Генерация изображений через Qwen Chat
-
-По умолчанию `/api/images/generations` использует **Qwen Chat**, а не DashScope. То есть отдельный `DASHSCOPE_API_KEY` не нужен — нужен активный Qwen Chat аккаунт.
-
-```bash
-curl http://localhost:3264/api/images/generations \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Кинематографичный робот в неоновом Токио, стиль sci-fi poster",
-    "model": "qwen3-vl-plus",
-    "size": "16:9"
-  }'
-```
-
-Пример ответа:
-
-```json
-{
-  "created": 1770000000,
-  "watermark": "t.me/forgetmeai",
-  "provider": "qwen-chat",
-  "model": "qwen3-vl-plus",
-  "data": [
-    { "url": "https://cdn.qwenlm.ai/.../image.png", "revised_prompt": "..." }
-  ]
-}
-```
-
-Поддерживаемые форматы `size` для Qwen Chat:
-
-- `16:9`
-- `9:16`
-- `1:1`
-- `4:3`
-- также можно передать OpenAI-style `1024x1024`, `1792x1024`, `1024x1792` — они будут преобразованы в aspect ratio.
-
-Старый DashScope-режим тоже оставлен:
-
-```json
-{
-  "provider": "dashscope",
-  "model": "qwen-image-plus",
-  "prompt": "..."
-}
-```
-
-Подробности: [IMAGE_VIDEO_GENERATION_GUIDE.md](IMAGE_VIDEO_GENERATION_GUIDE.md) и [docs/IMAGE_GENERATION.md](docs/IMAGE_GENERATION.md)
-
-## Генерация видео через Qwen Chat
-
-Создать видео и дождаться результата на сервере:
-
-```bash
-curl http://localhost:3264/api/videos/generations \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Камера медленно приближается к футуристическому городу ночью, cinematic, 5 seconds",
-    "model": "qwen3-vl-plus",
-    "size": "16:9",
-    "wait": true
-  }'
-```
-
-Если не хотите держать HTTP-соединение открытым:
-
-```bash
-curl http://localhost:3264/api/videos/generations \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Робот идёт под дождём в неоновом городе",
-    "size": "16:9",
-    "wait": false
-  }'
-```
-
-Ответ вернёт `task_id`. Проверить статус:
-
-```bash
-curl http://localhost:3264/api/tasks/status/TASK_ID
-```
-
-Или подождать завершения прямо в status endpoint:
-
-```bash
-curl "http://localhost:3264/api/tasks/status/TASK_ID?wait=true"
-```
-
 ## Open WebUI
 
 Для локального Open WebUI:
@@ -323,7 +234,6 @@ services:
 - **Обычный чат / агенты**: `qwen3.7-max`
 - **Быстрее и легче**: `qwen3.7-plus`
 - **Кодинг**: `qwen3-coder-plus`
-- **Изображения/видео через Qwen Chat**: `qwen3-vl-plus`
 - **Open WebUI default**: `qwen3.7-max`
 
 ## Полезные команды
@@ -341,16 +251,12 @@ SKIP_ACCOUNT_MENU=true npm start
 curl http://localhost:3264/api/health
 curl http://localhost:3264/api/status
 curl http://localhost:3264/api/models
-curl http://localhost:3264/api/images/status
-curl http://localhost:3264/api/videos/status
 ```
 
 ## Документация
 
-- [docs/FORK_DEMO_QUICKSTART.md](docs/FORK_DEMO_QUICKSTART.md) — быстрый сценарий для демо/видео.
+- [docs/FORK_DEMO_QUICKSTART.md](docs/FORK_DEMO_QUICKSTART.md) — быстрый сценарий для демо.
 - [docs/QWEN_CHAT_MODELS.md](docs/QWEN_CHAT_MODELS.md) — отчёт синхронизации моделей Qwen Chat.
-- [IMAGE_VIDEO_GENERATION_GUIDE.md](IMAGE_VIDEO_GENERATION_GUIDE.md) — генерация изображений и видео через `chatType`.
-- [docs/IMAGE_GENERATION.md](docs/IMAGE_GENERATION.md) — DashScope/Qwen Image endpoints.
 - [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md) — подключение Open WebUI.
 - [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml) — Hermes Agent provider.
 - [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_litellm.yaml) — LiteLLM bridge.
@@ -360,8 +266,6 @@ curl http://localhost:3264/api/videos/status
 - Это неофициальный browser-based proxy, Qwen может менять внутренний API.
 - Аккаунты Qwen Chat могут ловить лимиты; используйте несколько аккаунтов для round-robin.
 - Токены истекают — используйте `npm run auth -- --relogin`.
-- Генерация фото/видео зависит от доступности функций Qwen Chat на конкретном аккаунте.
-- URL сгенерированных медиа могут быть временными.
 - Для production используйте осторожно: это инструмент для экспериментов, демо и локальных workflow.
 
 ## От ForgetMeAI

@@ -1,6 +1,5 @@
 import express from "express";
 import adminRoutes from "./adminRoutes.js";
-import mediaRoutes from "./mediaRoutes.js";
 import fileRoutes from "./fileRoutes.js";
 import { sendMessage, getApiKeys } from "./chat.js";
 import {
@@ -59,7 +58,6 @@ const router = express.Router();
 
 // ─── Mount sub-routers (before auth) ──────────────────────────────────────
 router.use(adminRoutes);
-router.use(mediaRoutes);
 
 // ─── Auth middleware ─────────────────────────────────────────────────────────
 
@@ -93,17 +91,7 @@ router.use(fileRoutes);
 
 router.post("/chat", async (req, res) => {
   try {
-    const {
-      message,
-      messages,
-      model,
-      chatId,
-      parentId,
-      stream,
-      chatType,
-      size,
-      waitForCompletion,
-    } = req.body;
+    const { message, messages, model, chatId, parentId, stream } = req.body;
 
     // Поддержка как message, так и messages для совместимости
     let messageContent = message;
@@ -251,14 +239,10 @@ router.post("/chat", async (req, res) => {
           mappedModel,
           isMeta ? null : chatId,
           isMeta ? null : parentId,
-          null,
-          null,
-          null,
+          null, // files
+          null, // tools
+          null, // toolChoice
           systemMessage,
-          "t2t",
-          null,
-          true,
-          0,
           streamingCallback,
         );
 
@@ -342,13 +326,10 @@ router.post("/chat", async (req, res) => {
       mappedModel,
       isMeta ? null : chatId,
       isMeta ? null : parentId,
-      null,
-      null,
-      null,
+      null, // files
+      null, // tools
+      null, // toolChoice
       systemMessage,
-      chatType || "t2t",
-      size || null,
-      waitForCompletion ?? true,
     );
 
     if (result.choices && result.choices[0] && result.choices[0].message) {
@@ -647,14 +628,10 @@ router.post("/chat/completions", async (req, res) => {
           mappedModel,
           qwenChatId,
           effectiveParentId,
-          files, // ← ПЕРЕДАЁМ FILES
+          files,
           qwenTools,
           tool_choice,
           toolAwareSystemMessage,
-          "t2t",
-          null,
-          true,
-          0,
           streamingCallback,
         );
 
@@ -810,7 +787,7 @@ router.post("/chat/completions", async (req, res) => {
         mappedModel,
         qwenChatId,
         effectiveParentId,
-        null,
+        null, // files
         qwenTools,
         tool_choice,
         toolAwareSystemMessage,

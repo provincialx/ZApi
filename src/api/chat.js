@@ -22,15 +22,8 @@ import {
 export { pagePool, createPage };
 
 // Qwen API layer — re-exported for backward compatibility:
-// routes.js, adminRoutes.js, mediaRoutes.js, responseBuilders.js import here.
-export {
-  sendMessage,
-  createChatV2,
-  pollTaskStatus,
-  extractMediaUrl,
-  pollQwenTaskStatus,
-  testToken,
-} from "./qwenApi.js";
+// routes.js, adminRoutes.js, responseBuilders.js import here.
+export { sendMessage, createChatV2, testToken } from "./qwenApi.js";
 
 export async function clearPagePool() {
   await pagePool.clear();
