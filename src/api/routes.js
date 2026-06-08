@@ -1,7 +1,7 @@
 import express from "express";
 import adminRoutes from "./adminRoutes.js";
 import mediaRoutes from "./mediaRoutes.js";
-import { sendMessage, getApiKeys, createChatV2 } from "./chat.js";
+import { sendMessage, getApiKeys } from "./chat.js";
 import {
   truncateForPrompt,
   compactJsonSchema,
@@ -13,475 +13,50 @@ import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
 import { getMappedModel } from "./modelMapping.js";
 import { getStsToken, uploadFileToQwen } from "./fileUpload.js";
 import { loadHistory, saveHistory } from "./chatHistory.js";
-import {
-  MAX_FILE_SIZE,
-  UPLOADS_DIR,
-  STREAMING_CHUNK_DELAY,
-  ALLOW_UNSCOPED_SESSION_CHAT_RESTORE,
-} from "../config.js";
+import { MAX_FILE_SIZE, UPLOADS_DIR } from "../config.js";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 
-// ─── Idempotency / Dedup Cache ────────────────────────────────────────────────
-const idempotencyCache = new Map();
-const IDEM_CACHE_TTL_MS = 5000;
+// ─── Chat Session (idempotency, chat ID resolution, scoped sessions) ──────────
+import {
+  getIdempotencyKey,
+  getCachedResult,
+  cacheResult,
+  generateChatIdFromHistory,
+  normalizeIdValue,
+  buildInternalChatIdFromHint,
+  extractConversationHint,
+  extractParentHint,
+  shouldForceNewChat,
+  shouldPersistSessionContext,
+  getOrCreateModelDefaultChat,
+  saveModelDefaultChat,
+  invalidateModelDefaultChat,
+  resolveQwenChatId,
+  isOpenWebUiMetaRequest,
+  getSavedChatId,
+  saveChatIdForSession,
+  mapChatIdExport,
+  getModelDefaultChats,
+  TOOL_CALL_RESET_THRESHOLD,
+} from "./chatSession.js";
 
-function getIdempotencyKey(messages, chatId) {
-  if (!Array.isArray(messages) || messages.length === 0) return null;
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
-  if (!lastUser) return null;
-  let contentStr = "";
-  if (typeof lastUser.content === "string") {
-    contentStr = lastUser.content.substring(0, 200);
-  } else if (Array.isArray(lastUser.content)) {
-    const texts = lastUser.content
-      .filter((x) => x.type === "text")
-      .map((x) => x.text || "");
-    contentStr = texts.join("").substring(0, 200);
-  }
-  if (!contentStr) return null;
-  const contentHash = crypto.createHash("md5").update(contentStr).digest("hex");
-  return `idemp::${chatId || "none"}::${contentHash}`;
-}
+// ─── OpenAI Message Processing ─────────────────────────────────────────────
+import {
+  parseOpenAIMessages,
+  buildCombinedTools,
+  areAllToolsFailed,
+  hasOpenAIToolState,
+  prepareOpenAIMessageInput,
+} from "./openaiUtils.js";
 
-function getCachedResult(key) {
-  if (!key) return null;
-  const entry = idempotencyCache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > IDEM_CACHE_TTL_MS) {
-    idempotencyCache.delete(key);
-    return null;
-  }
-  logInfo(`⚡️ Idempotency hit: returning cached result`);
-  return entry.result;
-}
-
-function cacheResult(key, result) {
-  if (!key || !result) return;
-  idempotencyCache.set(key, { result, timestamp: Date.now() });
-  if (idempotencyCache.size > 1000) {
-    const now = Date.now();
-    for (const [k, v] of idempotencyCache) {
-      if (now - v.timestamp > IDEM_CACHE_TTL_MS) idempotencyCache.delete(k);
-    }
-  }
-}
-
-// Функция для генерирования детерминированного chatId на основе истории
-function generateChatIdFromHistory(messages) {
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return null;
-  }
-
-  // Фильтруем служебные сообщения Open WebUI
-  // Игнорируем сообщения, которые начинаются с "### Task:" или "History:"
-  const realMessages = messages.filter((m) => {
-    if (m.role !== "user") return true;
-    const content = typeof m.content === "string" ? m.content : "";
-    return !content.startsWith("### Task:") && !content.startsWith("History:");
-  });
-
-  // Если остались только служебные сообщения, используем исходные
-  const messagesToUse = realMessages.length > 0 ? realMessages : messages;
-
-  // Используем хеш первого реального сообщения пользователя для создания стабильного ID
-  const userMessages = messagesToUse
-    .filter((m) => m.role === "user")
-    .slice(0, 1) // Берём первое сообщение пользователя
-    .map((m) =>
-      typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-    )
-    .join("||");
-
-  if (!userMessages) return null;
-
-  // Создаём хеш для детерминированного ID
-  const hash = crypto
-    .createHash("sha256")
-    .update(userMessages)
-    .digest("hex")
-    .substring(0, 16);
-
-  return `chat_${hash}`;
-}
-
-function normalizeIdValue(value) {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number" || typeof value === "bigint")
-    return String(value);
-  if (typeof value !== "string") return null;
-
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  const lower = trimmed.toLowerCase();
-  if (lower === "null" || lower === "undefined") return null;
-
-  return trimmed;
-}
-
-function pickFirstId(candidates) {
-  for (const candidate of candidates) {
-    const normalized = normalizeIdValue(candidate);
-    if (normalized) return normalized;
-  }
-  return null;
-}
-
-function buildInternalChatIdFromHint(hint) {
-  const normalizedHint = normalizeIdValue(hint);
-  if (!normalizedHint) return null;
-
-  const hash = crypto
-    .createHash("sha256")
-    .update(`client-conversation:${normalizedHint}`)
-    .digest("hex")
-    .substring(0, 16);
-
-  return `chat_${hash}`;
-}
-
-function extractConversationHint(req) {
-  const body = req.body || {};
-  const metadata =
-    body && typeof body.metadata === "object" ? body.metadata : {};
-
-  return pickFirstId([
-    body.conversation_id,
-    body.conversationId,
-    body.chat_id,
-    metadata.conversation_id,
-    metadata.conversationId,
-    metadata.chat_id,
-    metadata.chatId,
-    req.get?.("x-conversation-id"),
-    req.get?.("x-openwebui-conversation-id"),
-    req.get?.("x-chat-id"),
-    req.get?.("x-openwebui-chat-id"),
-  ]);
-}
-
-function extractParentHint(req) {
-  const body = req.body || {};
-  const metadata =
-    body && typeof body.metadata === "object" ? body.metadata : {};
-
-  return pickFirstId([
-    body.parentId,
-    body.parent_id,
-    body.x_qwen_parent_id,
-    body.response_id,
-    metadata.parentId,
-    metadata.parent_id,
-    metadata.response_id,
-    req.get?.("x-parent-id"),
-    req.get?.("x-openwebui-parent-id"),
-  ]);
-}
-
-function isTruthyFlag(value) {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value === 1;
-  if (typeof value !== "string") return false;
-  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
-function shouldForceNewChat(req) {
-  const body = req.body || {};
-
-  return [
-    body.newChat,
-    body.new_chat,
-    body.resetChat,
-    body.reset_chat,
-    req.get?.("x-new-chat"),
-    req.get?.("x-reset-chat"),
-  ].some(isTruthyFlag);
-}
-
-function shouldPersistSessionContext(scope = null) {
-  const normalizedScope = normalizeIdValue(scope);
-  return Boolean(normalizedScope) || ALLOW_UNSCOPED_SESSION_CHAT_RESTORE;
-}
-
-// Глобальное fallback-хранилище: один чат на модель для агентов без conversation_hint.
-// Предотвращает мультипликацию чатов когда клиент (Zed) не передаёт chatId/conversation_id.
-const modelDefaultChats = new Map(); // model -> {chatId, parentId, timestamp, toolCallCount}
-
-/**
- * Auto-reset контекста Qwen чата после N вызовов инструментов.
- * Накопленный инструментальный контекст заставляет модель `qwen3.7-max` отвечать текстом вместо JSON.
- * Fresh chat = стабильный tool call parsing.
- * Конфигурация через TOOL_CALL_RESET_THRESHOLD (по умолчанию: 8)
- */
-const TOOL_CALL_RESET_THRESHOLD =
-  Number(process.env.TOOL_CALL_RESET_THRESHOLD) || 8;
-
-// Tracks models invalidated by auto-reset. Force Folding applied on NEXT request.
-const forceResetModels = new Set();
-const FORCE_FOLD_HEAD = 5;
-const FORCE_FOLD_TAIL = 10;
-
-function applyForceFolding(messages, mappedModel) {
-  if (!forceResetModels.has(mappedModel)) return messages;
-  const systemMsgs = messages.filter((m) => m?.role === "system");
-  let nonSys = messages.filter((m) => m?.role !== "system");
-  if (nonSys.length < FORCE_FOLD_HEAD + FORCE_FOLD_TAIL) {
-    forceResetModels.delete(mappedModel);
-    return messages;
-  }
-  const head = nonSys.slice(0, FORCE_FOLD_HEAD);
-  const tailStart = Math.max(FORCE_FOLD_HEAD, nonSys.length - FORCE_FOLD_TAIL);
-  const tail = nonSys.slice(tailStart);
-  const discarded = nonSys.slice(FORCE_FOLD_HEAD, tailStart);
-  const toolSummary = summarizeDiscardedTools(discarded);
-  logInfo(
-    "🔁 Force Folding: " +
-      messages.length +
-      "→" +
-      (head.length + tail.length) +
-      " msgs. " +
-      discarded.length +
-      " turns compressed",
-  );
-  forceResetModels.delete(mappedModel);
-  return [...systemMsgs, ...head, toolSummary, ...tail];
-}
-
-function summarizeDiscardedTools(messages) {
-  const toolCounts = {};
-  let assistantCount = 0;
-  let toolResultCount = 0;
-  for (const msg of messages) {
-    if (!msg) continue;
-    if (msg.role === "assistant") {
-      assistantCount++;
-      if (Array.isArray(msg.tool_calls))
-        for (const tc of msg.tool_calls) {
-          const name = tc?.function?.name || tc?.name || "unknown";
-          toolCounts[name] = (toolCounts[name] || 0) + 1;
-        }
-    } else if (msg.role === "tool") {
-      toolResultCount++;
-    }
-  }
-  let summaryText =
-    "\n[Previous agent work (compressed for context):\n" +
-    assistantCount +
-    " assistant turns across " +
-    toolResultCount +
-    " tool executions]\n";
-  if (Object.keys(toolCounts).length > 0) {
-    const usage = Object.entries(toolCounts)
-      .sort((a, b) => b[1] - a[1])
-      .map(function (p) {
-        return "  " + p[0] + ": " + p[1] + "x";
-      })
-      .join("\n");
-    summaryText += "\nTool usage:\n" + usage;
-  }
-  return { role: "user", content: summaryText };
-}
-
-function getOrCreateModelDefaultChat(model) {
-  const existing = modelDefaultChats.get(model);
-  if (
-    existing &&
-    Date.now() - existing.timestamp < 3600000 * 24 // 24 hours
-  ) {
-    return { chatId: existing.chatId, parentId: existing.parentId };
-  }
-  return null; // Создадим новый в resolveQwenChatId
-}
-
-function saveModelDefaultChat(model, chatId, parentId) {
-  const existing = modelDefaultChats.get(model);
-  modelDefaultChats.set(model, {
-    chatId,
-    parentId,
-    timestamp: Date.now(),
-    toolCallCount: existing?.toolCallCount || 0,
-  });
-  logDebug(`Default чат для ${model}: ${chatId}`);
-}
-
-function invalidateModelDefaultChat(model) {
-  const removed = modelDefaultChats.delete(model);
-  if (removed) {
-    logInfo(`🗑 Инвалидирован default-чат для ${model}: ${removed.chatId}`);
-  }
-  for (const [key, val] of chatIdMap.entries()) {
-    if (val === removed?.chatId) {
-      chatIdMap.delete(key);
-      logDebug(`Очищен маппинг: ${key} -> (удалён)`);
-    }
-  }
-  forceResetModels.add(model);
-}
-
-function isChatNotExistError(result) {
-  const body = result?.details || "";
-  return typeof body === "string" && /not exist/i.test(body);
-}
-
-// Глобальное хранилище для маппинга между сгенерированными ID и реальными Qwen chatId
-const chatIdMap = new Map();
-
-function mapChatId(generatedId, qwenChatId) {
-  if (generatedId) {
-    chatIdMap.set(generatedId, qwenChatId);
-    logDebug(`Маппинг чата: ${generatedId} -> ${qwenChatId}`);
-  }
-}
-
-function getChatIdFromMap(generatedId) {
-  return generatedId ? chatIdMap.get(generatedId) : null;
-}
-
-async function resolveQwenChatId(effectiveChatId, mappedModel) {
-  let qwenChatId = effectiveChatId;
-  const mapped = getChatIdFromMap(effectiveChatId);
-
-  if (mapped) {
-    qwenChatId = mapped;
-    logInfo(
-      `🔁 Используется сопоставленный Qwen chatId: ${qwenChatId} (from ${effectiveChatId})`,
-    );
-    return qwenChatId;
-  }
-
-  // Если нет эффективного ID или он сгенерированный — попробуй дефолтный чат на модель
-  if (!qwenChatId || effectiveChatId?.startsWith("chat_")) {
-    const defaultForModel = getOrCreateModelDefaultChat(mappedModel);
-    if (defaultForModel) {
-      logInfo(
-        `♻️ Дефолтный Qwen чат для ${mappedModel}: ${defaultForModel.chatId}`,
-      );
-      qwenChatId = defaultForModel.chatId;
-
-      // Если было chat_XXX — замапим, чтобы reuse
-      if (effectiveChatId && effectiveChatId.startsWith("chat_")) {
-        mapChatId(effectiveChatId, qwenChatId);
-      }
-    }
-  }
-
-  // Создай новый Qwen чат только если нет ни маппинга, ни дефолтного для модели
-  if (!qwenChatId && effectiveChatId && effectiveChatId.startsWith("chat_")) {
-    try {
-      const created = await createChatV2(mappedModel, "Сессия OpenWebUI");
-      if (created && created.chatId) {
-        mapChatId(effectiveChatId, created.chatId);
-        qwenChatId = created.chatId;
-
-        saveModelDefaultChat(mappedModel, qwenChatId, null);
-
-        logInfo(
-          `🔨 Создан Qwen chat ${qwenChatId} и привязан к ${effectiveChatId}`,
-        );
-      }
-    } catch (error) {
-      logDebug(
-        `Не удалось создать Qwen chat для ${effectiveChatId}: ${error.message}`,
-      );
-    }
-  }
-
-  return qwenChatId;
-}
-
-function isOpenWebUiMetaRequest(messages) {
-  if (!Array.isArray(messages) || messages.length === 0) return false;
-  const lastUserMessage = messages.filter((m) => m && m.role === "user").pop();
-  if (!lastUserMessage) return false;
-
-  const content = lastUserMessage.content;
-  if (Array.isArray(content)) return false; // multimodal / normal user message
-  if (typeof content !== "string") return false;
-
-  const text = content.trimStart();
-
-  // OpenWebUI background/meta prompts that should not reuse the main chatId/session.
-  if (text.startsWith("### Task:")) return true;
-  if (text.startsWith("History:")) return true;
-
-  // Some variants embed history blocks and task instructions.
-  if (text.includes("<chat_history>") && text.includes("### Task:"))
-    return true;
-
-  return false;
-}
-
-// ============================================
-// СЕССИОННАЯ СИСТЕМА ДЛЯ ОТСЛЕЖИВАНИЯ ЧАТОВ
-// ============================================
-// Scoped-сессии (по conversation_id/chat_id) включены всегда.
-// Unscoped fallback по IP + User-Agent работает только в legacy-режиме
-// через ALLOW_UNSCOPED_SESSION_CHAT_RESTORE=true.
-const sessionToChatMap = new Map(); // session-key -> {chatId, parentId, timestamp}
-
-function getSessionKey(req) {
-  // Создаём уникальный ключ сессии на основе IP и User-Agent
-  const ip = req.ip || req.connection.remoteAddress || "unknown";
-  const userAgent = req.get("user-agent") || "unknown";
-  return crypto
-    .createHash("sha256")
-    .update(`${ip}||${userAgent}`)
-    .digest("hex");
-}
-
-function getScopedSessionKey(req, scope = null) {
-  const baseKey = getSessionKey(req);
-  const normalizedScope = normalizeIdValue(scope);
-  return normalizedScope ? `${baseKey}::${normalizedScope}` : baseKey;
-}
-
-function getSavedChatId(req, scope = null) {
-  const keysToTry = [getScopedSessionKey(req, scope)];
-
-  for (const sessionKey of keysToTry) {
-    const sessionData = sessionToChatMap.get(sessionKey);
-    if (sessionData && Date.now() - sessionData.timestamp < 3600000) {
-      // 1 hour
-      return sessionData;
-    }
-  }
-
-  return null;
-}
-function saveChatIdForSession(req, chatId, parentId, scope = null) {
-  const sessionKey = getScopedSessionKey(req, scope);
-  const normalizedScope = normalizeIdValue(scope);
-
-  sessionToChatMap.set(sessionKey, {
-    chatId,
-    parentId,
-    scope: normalizedScope,
-    timestamp: Date.now(),
-  });
-
-  const scopeSuffix = normalizedScope ? ` (scope=${normalizedScope})` : "";
-  logDebug(
-    `Saved chatId ${chatId} for session ${sessionKey.substring(0, 8)}${scopeSuffix}`,
-  );
-}
-// Очистка старых сессий каждые 10 минут
-setInterval(() => {
-  const now = Date.now();
-  const oneHourAgo = now - 3600000;
-  let cleaned = 0;
-  for (const [key, value] of sessionToChatMap.entries()) {
-    if (value.timestamp < oneHourAgo) {
-      sessionToChatMap.delete(key);
-      cleaned++;
-    }
-  }
-  if (cleaned > 0) {
-    logDebug(`Очищено ${cleaned} старых сессий`);
-  }
-}, 600000); // 10 минут
+// ─── Response Builders (streaming, tool calls SSE) ─────────────────────────
+import {
+  buildOpenAIToolResponse,
+  writeToolCallsSse,
+} from "./responseBuilders.js";
 
 const router = express.Router();
 
@@ -536,442 +111,6 @@ router.use((req, res, next) => {
   req.url = req.url.replace(/\/v[12](?=\/|$)/g, "").replace(/\/+/g, "/");
   next();
 });
-
-// ─── Helpers: message parsing ────────────────────────────────────────────────
-
-function parseOpenAIMessages(messages) {
-  const systemMsg = messages.find((msg) => msg.role === "system");
-  const systemMessage = systemMsg ? systemMsg.content : null;
-  const lastUserMessage = messages.filter((msg) => msg.role === "user").pop();
-
-  if (!lastUserMessage) {
-    return { messageContent: null, systemMessage };
-  }
-
-  let messageContent = lastUserMessage.content;
-
-  // Преобразуем OpenAI format content array во внутренний формат
-  if (Array.isArray(messageContent)) {
-    messageContent = messageContent.map((item) => {
-      if (item.type === "text") {
-        return { type: "text", text: item.text };
-      } else if (item.type === "image_url" && item.image_url) {
-        // OpenAI format: image_url: { url: '...' }
-        return { type: "image", image: item.image_url.url };
-      } else if (item.type === "image") {
-        // Уже во внутреннем формате
-        return { type: "image", image: item.image };
-      }
-      return item;
-    });
-  }
-
-  return { messageContent, systemMessage };
-}
-
-function buildCombinedTools(tools, functions, toolChoice) {
-  const combinedTools =
-    tools ||
-    (functions
-      ? functions.map((fn) => ({ type: "function", function: fn }))
-      : null);
-  return { combinedTools, toolChoice };
-}
-
-function stringifyOpenAIContent(content) {
-  if (content === null || content === undefined) return "";
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (!item) return "";
-        if (typeof item === "string") return item;
-        if (item.type === "text") return item.text || "";
-        if (item.type === "image_url")
-          return `[image: ${item.image_url?.url || ""}]`;
-        if (item.type === "image") return `[image: ${item.image || ""}]`;
-        if (item.type === "file")
-          return `[file: ${item.file || item.name || ""}]`;
-        return JSON.stringify(item);
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-  return JSON.stringify(content);
-}
-
-function buildStatelessTranscript(messages) {
-  const parts = [];
-  for (const msg of messages || []) {
-    if (!msg || msg.role === "system") continue;
-    if (msg.role === "user") {
-      parts.push(`User: ${stringifyOpenAIContent(msg.content)}`);
-    } else if (msg.role === "assistant") {
-      const text = stringifyOpenAIContent(msg.content);
-      if (text) parts.push(`Assistant: ${text}`);
-      if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-        const actions = msg.tool_calls
-          .map((tc) => tc?.function?.name || tc?.name)
-          .join(", ");
-        parts.push(`Assistant used tools: ${actions}`);
-      }
-    } else if (msg.role === "tool") {
-      const name = msg.name || msg.tool_call_id || "tool";
-      const toolResult = stringifyOpenAIContent(msg.content);
-      // Label failed executions clearly so Qwen doesn't mirror error text
-      if (isToolFailure(toolResult)) {
-        parts.push(`Tool ${name} was not available.`);
-      } else {
-        parts.push(`Tool result (${name}): ${toolResult}`);
-      }
-    } else {
-      parts.push(
-        `${msg.role || "message"}: ${stringifyOpenAIContent(msg.content)}`,
-      );
-    }
-  }
-  return parts.join("\n\n");
-}
-
-// Check if a single tool result indicates execution failure
-function isToolFailure(content) {
-  if (typeof content !== "string" || !content.trim()) return false;
-  const patterns = [
-    /does not exist/i,
-    /not found/i,
-    /unavailable/i,
-    /not supported/i,
-    /is not available/i,
-    /unknown tool/i,
-    /invalid tool/i,
-    /no such tool/i,
-  ];
-  return patterns.some((p) => p.test(content));
-}
-
-// Check if all tool results indicate failure — when every call failed, injecting
-// more tool prompts makes Qwen hallucinate identical error text instead of JSON
-// or natural answers. Skip injection to let the model respond naturally.
-function areAllToolsFailed(messages) {
-  const toolMessages = (messages || []).filter(
-    (msg) => msg?.role === "tool" || msg?.role === "function",
-  );
-  if (toolMessages.length === 0) return false;
-  return toolMessages.every((msg) => {
-    const content = stringifyOpenAIContent(msg.content);
-    return isToolFailure(content);
-  });
-}
-
-function hasOpenAIToolState(messages) {
-  return (messages || []).some(
-    (msg) =>
-      msg?.role === "tool" ||
-      msg?.role === "function" ||
-      (msg?.role === "assistant" &&
-        Array.isArray(msg.tool_calls) &&
-        msg.tool_calls.length > 0) ||
-      (msg?.role === "assistant" && msg.function_call),
-  );
-}
-
-function shouldFoldOpenAITranscript(messages, combinedTools, effectiveChatId) {
-  const nonSystemMessages = (messages || []).filter(
-    (msg) => msg && msg.role !== "system",
-  );
-  if (nonSystemMessages.length === 0) return false;
-
-  // Hermes/OpenAI agents send the full state every request. After a tool call the
-  // next request often ends with role=tool, not role=user. Qwen Chat has no native
-  // OpenAI tool-result role, so preserving context means folding the whole OpenAI
-  // transcript into a single user message for that turn.
-  if (hasOpenAIToolState(messages)) return true;
-
-  // If FreeQwenApi is used as a stateless OpenAI-compatible endpoint and no
-  // conversation id/chat id was provided, keep the complete client-side history.
-  if (!effectiveChatId && nonSystemMessages.length > 1) return true;
-
-  // When tools are available, prefer the OpenAI transcript over Qwen's opaque web
-  // chat memory on multi-message turns. This keeps Hermes skill/tool discipline in
-  // the prompt visible to Qwen instead of depending on previous web-chat state.
-  if (
-    Array.isArray(combinedTools) &&
-    combinedTools.length > 0 &&
-    nonSystemMessages.length > 1
-  )
-    return true;
-
-  return false;
-}
-
-function prepareOpenAIMessageInput(
-  messages,
-  combinedTools,
-  effectiveChatId,
-  rawModel = null,
-) {
-  // Force Folding: compress accumulated tool history after auto-reset
-  if (rawModel && hasOpenAIToolState(messages)) {
-    const mm = getMappedModel(rawModel);
-    if (forceResetModels.has(mm)) {
-      const originalCount = messages.length;
-      messages = applyForceFolding(messages, mm);
-      if (messages.length !== originalCount)
-        logDebug(
-          "Force Folding applied: " +
-            originalCount +
-            "→" +
-            messages.length +
-            " msgs",
-        );
-    }
-  }
-
-  const lastUserMessage = (messages || [])
-    .filter((msg) => msg && msg.role === "user")
-    .pop();
-  if (shouldFoldOpenAITranscript(messages, combinedTools, effectiveChatId)) {
-    return {
-      messageContent: buildStatelessTranscript(messages),
-      files: lastUserMessage?.files || [],
-      folded: true,
-      missingUser: false,
-    };
-  }
-
-  if (!lastUserMessage) {
-    return {
-      messageContent: null,
-      files: [],
-      folded: false,
-      missingUser: true,
-    };
-  }
-
-  return {
-    messageContent: lastUserMessage.content,
-    files: lastUserMessage.files || [],
-    folded: false,
-    missingUser: false,
-  };
-}
-
-function buildOpenAIToolResponse(result, mappedModel, toolCalls) {
-  return {
-    id: result.id || "chatcmpl-" + Date.now(),
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: result.model || mappedModel || "qwen-max-latest",
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: null,
-          tool_calls: toolCalls.map(({ index, ...call }) => call),
-        },
-        finish_reason: "tool_calls",
-      },
-    ],
-    usage: result.usage || {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
-    },
-    chatId: result.chatId,
-    parentId: result.parentId || result.response_id,
-    x_qwen_chat_id: result.chatId,
-    x_qwen_parent_id: result.parentId || result.response_id,
-  };
-}
-
-function writeToolCallsSse(res, mappedModel, result, toolCalls) {
-  const base = {
-    id: result.id || "chatcmpl-stream",
-    object: "chat.completion.chunk",
-    created: Math.floor(Date.now() / 1000),
-    model: result.model || mappedModel || "qwen-max-latest",
-  };
-  res.write(
-    "data: " +
-      JSON.stringify({
-        ...base,
-        choices: [
-          { index: 0, delta: { role: "assistant" }, finish_reason: null },
-        ],
-      }) +
-      "\n\n",
-  );
-  for (const call of toolCalls) {
-    res.write(
-      "data: " +
-        JSON.stringify({
-          ...base,
-          choices: [
-            {
-              index: 0,
-              delta: {
-                tool_calls: [
-                  {
-                    index: call.index,
-                    id: call.id,
-                    type: "function",
-                    function: call.function,
-                  },
-                ],
-              },
-              finish_reason: null,
-            },
-          ],
-        }) +
-        "\n\n",
-    );
-  }
-  res.write(
-    "data: " +
-      JSON.stringify({
-        ...base,
-        choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
-      }) +
-      "\n\n",
-  );
-  res.write("data: [DONE]\n\n");
-  res.end();
-}
-
-// ─── Helpers: streaming ──────────────────────────────────────────────────────
-
-async function handleStreamingResponse(
-  res,
-  mappedModel,
-  messageContent,
-  chatId,
-  parentId,
-  combinedTools,
-  toolChoice,
-  systemMessage,
-) {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  const writeSse = (payload) =>
-    res.write("data: " + JSON.stringify(payload) + "\n\n");
-
-  writeSse({
-    id: "chatcmpl-stream",
-    object: "chat.completion.chunk",
-    created: Math.floor(Date.now() / 1000),
-    model: mappedModel,
-    choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
-  });
-
-  try {
-    const result = await sendMessage(
-      messageContent,
-      mappedModel,
-      chatId,
-      parentId,
-      null,
-      combinedTools,
-      toolChoice,
-      systemMessage,
-    );
-
-    if (result.error) {
-      writeSse({
-        id: "chatcmpl-stream",
-        object: "chat.completion.chunk",
-        created: Math.floor(Date.now() / 1000),
-        model: mappedModel,
-        choices: [
-          {
-            index: 0,
-            delta: { content: `Ошибка: ${result.error}` },
-            finish_reason: null,
-          },
-        ],
-      });
-    } else if (result.choices?.[0]?.message) {
-      const content = String(result.choices[0].message.content || "");
-      const codePoints = Array.from(content);
-      const chunkSize = 16;
-      for (let i = 0; i < codePoints.length; i += chunkSize) {
-        writeSse({
-          id: "chatcmpl-stream",
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
-          model: mappedModel,
-          choices: [
-            {
-              index: 0,
-              delta: { content: codePoints.slice(i, i + chunkSize).join("") },
-              finish_reason: null,
-            },
-          ],
-        });
-        await new Promise((r) => setTimeout(r, STREAMING_CHUNK_DELAY));
-      }
-    }
-
-    writeSse({
-      id: "chatcmpl-stream",
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: mappedModel,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-    });
-    res.write("data: [DONE]\n\n");
-    res.end();
-  } catch (error) {
-    logError("Ошибка при обработке потокового запроса", error);
-    writeSse({
-      id: "chatcmpl-stream",
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: mappedModel,
-      choices: [
-        {
-          index: 0,
-          delta: { content: "Internal server error" },
-          finish_reason: "stop",
-        },
-      ],
-    });
-    res.write("data: [DONE]\n\n");
-    res.end();
-  }
-}
-
-function handleNonStreamingResponse(res, result, mappedModel) {
-  if (result.error) {
-    return res
-      .status(500)
-      .json({ error: { message: result.error, type: "server_error" } });
-  }
-
-  res.json({
-    id: result.id || "chatcmpl-" + Date.now(),
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: result.model || mappedModel,
-    choices: result.choices || [
-      {
-        index: 0,
-        message: { role: "assistant", content: "" },
-        finish_reason: "stop",
-      },
-    ],
-    usage: result.usage || {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
-    },
-    chatId: result.chatId,
-    parentId: result.parentId,
-  });
-}
-
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 router.post("/chat", async (req, res) => {
@@ -1519,7 +658,7 @@ router.post("/chat/completions", async (req, res) => {
           if (toolCalls && toolCalls.length > 0) {
             writeToolCallsSse(res, mappedModel, result, toolCalls);
             // Auto-reset: инкремент после успешного вызова инструмента.
-            const defChat = modelDefaultChats.get(mappedModel);
+            const defChat = getModelDefaultChats().get(mappedModel);
             if (defChat && !explicitChatId) {
               defChat.toolCallCount = (defChat.toolCallCount || 0) + 1;
               if (defChat.toolCallCount >= TOOL_CALL_RESET_THRESHOLD) {
@@ -1541,7 +680,7 @@ router.post("/chat/completions", async (req, res) => {
             effectiveChatId.startsWith("chat_") &&
             resolvedChatId
           ) {
-            mapChatId(effectiveChatId, resolvedChatId);
+            mapChatIdExport(effectiveChatId, resolvedChatId);
             logDebug(
               `Маппинг сохранён: ${effectiveChatId} -> ${resolvedChatId}`,
             );
@@ -1678,7 +817,7 @@ router.post("/chat/completions", async (req, res) => {
           effectiveChatId.startsWith("chat_") &&
           resolvedChatId
         ) {
-          mapChatId(effectiveChatId, resolvedChatId);
+          mapChatIdExport(effectiveChatId, resolvedChatId);
           logDebug(`Маппинг сохранён: ${effectiveChatId} -> ${resolvedChatId}`);
         }
         if (shouldPersistSessionContext(conversationScope)) {
@@ -2020,7 +1159,7 @@ router.post("/v1/chat/completions", async (req, res) => {
           if (toolCalls && toolCalls.length > 0) {
             writeToolCallsSse(res, mappedModel, result, toolCalls);
             // Auto-reset: инкремент после успешного вызова инструмента.
-            const defChat = modelDefaultChats.get(mappedModel);
+            const defChat = getModelDefaultChats().get(mappedModel);
             if (defChat && !explicitChatId) {
               defChat.toolCallCount = (defChat.toolCallCount || 0) + 1;
               if (defChat.toolCallCount >= TOOL_CALL_RESET_THRESHOLD) {
@@ -2157,7 +1296,7 @@ router.post("/v1/chat/completions", async (req, res) => {
           effectiveChatId.startsWith("chat_") &&
           resolvedChatId
         ) {
-          mapChatId(effectiveChatId, resolvedChatId);
+          mapChatIdExport(effectiveChatId, resolvedChatId);
           logDebug(`Маппинг сохранён: ${effectiveChatId} -> ${resolvedChatId}`);
         }
         if (shouldPersistSessionContext(conversationScope)) {

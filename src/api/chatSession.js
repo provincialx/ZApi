@@ -1,0 +1,473 @@
+import crypto from "crypto";
+import { logInfo, logDebug } from "../logger/index.js";
+import { ALLOW_UNSCOPED_SESSION_CHAT_RESTORE } from "../config.js";
+import { createChatV2 } from "./chat.js";
+import { getMappedModel } from "./modelMapping.js";
+
+// ─── Idempotency / Dedup Cache ────────────────────────────────────────────────
+const idempotencyCache = new Map();
+const IDEM_CACHE_TTL_MS = 5000;
+
+export function getIdempotencyKey(messages, chatId) {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  if (!lastUser) return null;
+  let contentStr = "";
+  if (typeof lastUser.content === "string") {
+    contentStr = lastUser.content.substring(0, 200);
+  } else if (Array.isArray(lastUser.content)) {
+    const texts = lastUser.content
+      .filter((x) => x.type === "text")
+      .map((x) => x.text || "");
+    contentStr = texts.join("").substring(0, 200);
+  }
+  if (!contentStr) return null;
+  const contentHash = crypto.createHash("md5").update(contentStr).digest("hex");
+  return `idemp::${chatId || "none"}::${contentHash}`;
+}
+
+export function getCachedResult(key) {
+  if (!key) return null;
+  const entry = idempotencyCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > IDEM_CACHE_TTL_MS) {
+    idempotencyCache.delete(key);
+    return null;
+  }
+  logInfo(`⚡️ Idempotency hit: returning cached result`);
+  return entry.result;
+}
+
+export function cacheResult(key, result) {
+  if (!key || !result) return;
+  idempotencyCache.set(key, { result, timestamp: Date.now() });
+  if (idempotencyCache.size > 1000) {
+    const now = Date.now();
+    for (const [k, v] of idempotencyCache) {
+      if (now - v.timestamp > IDEM_CACHE_TTL_MS) idempotencyCache.delete(k);
+    }
+  }
+}
+
+// ─── Chat ID Generation & Normalization ──────────────────────────────────────
+
+export function generateChatIdFromHistory(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+
+  const realMessages = messages.filter((m) => {
+    if (m.role !== "user") return true;
+    const content = typeof m.content === "string" ? m.content : "";
+    return !content.startsWith("### Task:") && !content.startsWith("History:");
+  });
+
+  const messagesToUse = realMessages.length > 0 ? realMessages : messages;
+
+  const userMessages = messagesToUse
+    .filter((m) => m.role === "user")
+    .slice(0, 1)
+    .map((m) =>
+      typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+    )
+    .join("||");
+
+  if (!userMessages) return null;
+
+  const hash = crypto
+    .createHash("sha256")
+    .update(userMessages)
+    .digest("hex")
+    .substring(0, 16);
+
+  return `chat_${hash}`;
+}
+
+export function normalizeIdValue(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" || typeof value === "bigint")
+    return String(value);
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const lower = trimmed.toLowerCase();
+  if (lower === "null" || lower === "undefined") return null;
+
+  return trimmed;
+}
+
+function pickFirstId(candidates) {
+  for (const candidate of candidates) {
+    const normalized = normalizeIdValue(candidate);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+export function buildInternalChatIdFromHint(hint) {
+  const normalizedHint = normalizeIdValue(hint);
+  if (!normalizedHint) return null;
+
+  const hash = crypto
+    .createHash("sha256")
+    .update(`client-conversation:${normalizedHint}`)
+    .digest("hex")
+    .substring(0, 16);
+
+  return `chat_${hash}`;
+}
+
+export function extractConversationHint(req) {
+  const body = req.body || {};
+  const metadata =
+    body && typeof body.metadata === "object" ? body.metadata : {};
+
+  return pickFirstId([
+    body.conversation_id,
+    body.conversationId,
+    body.chat_id,
+    metadata.conversation_id,
+    metadata.conversationId,
+    metadata.chat_id,
+    metadata.chatId,
+    req.get?.("x-conversation-id"),
+    req.get?.("x-openwebui-conversation-id"),
+    req.get?.("x-chat-id"),
+    req.get?.("x-openwebui-chat-id"),
+  ]);
+}
+
+export function extractParentHint(req) {
+  const body = req.body || {};
+  const metadata =
+    body && typeof body.metadata === "object" ? body.metadata : {};
+
+  return pickFirstId([
+    body.parentId,
+    body.parent_id,
+    body.x_qwen_parent_id,
+    body.response_id,
+    metadata.parentId,
+    metadata.parent_id,
+    metadata.response_id,
+    req.get?.("x-parent-id"),
+    req.get?.("x-openwebui-parent-id"),
+  ]);
+}
+
+function isTruthyFlag(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value !== "string") return false;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+export function shouldForceNewChat(req) {
+  const body = req.body || {};
+
+  return [
+    body.newChat,
+    body.new_chat,
+    body.resetChat,
+    body.reset_chat,
+    req.get?.("x-new-chat"),
+    req.get?.("x-reset-chat"),
+  ].some(isTruthyFlag);
+}
+
+export function shouldPersistSessionContext(scope = null) {
+  const normalizedScope = normalizeIdValue(scope);
+  return Boolean(normalizedScope) || ALLOW_UNSCOPED_SESSION_CHAT_RESTORE;
+}
+
+// ─── Model Default Chats ──────────────────────────────────────────────────────
+// One chat per model for agents without conversation_hint.
+const modelDefaultChats = new Map();
+
+/**
+ * Auto-reset Qwen chat context after N tool calls.
+ * Accumulated tool context makes qwen3.7-max answer text instead of JSON.
+ * Config: TOOL_CALL_RESET_THRESHOLD (default: 8)
+ */
+export const TOOL_CALL_RESET_THRESHOLD =
+  Number(process.env.TOOL_CALL_RESET_THRESHOLD) || 8;
+
+// Tracks models invalidated by auto-reset. Force Folding applied on NEXT request.
+const forceResetModels = new Set();
+export const FORCE_FOLD_HEAD = 5;
+export const FORCE_FOLD_TAIL = 10;
+
+export function applyForceFolding(messages, mappedModel) {
+  if (!forceResetModels.has(mappedModel)) return messages;
+  const systemMsgs = messages.filter((m) => m?.role === "system");
+  let nonSys = messages.filter((m) => m?.role !== "system");
+  if (nonSys.length < FORCE_FOLD_HEAD + FORCE_FOLD_TAIL) {
+    forceResetModels.delete(mappedModel);
+    return messages;
+  }
+  const head = nonSys.slice(0, FORCE_FOLD_HEAD);
+  const tailStart = Math.max(FORCE_FOLD_HEAD, nonSys.length - FORCE_FOLD_TAIL);
+  const tail = nonSys.slice(tailStart);
+  const discarded = nonSys.slice(FORCE_FOLD_HEAD, tailStart);
+  const toolSummary = summarizeDiscardedTools(discarded);
+  logInfo(
+    "🔁 Force Folding: " +
+      messages.length +
+      "→" +
+      (head.length + tail.length) +
+      " msgs. " +
+      discarded.length +
+      " turns compressed",
+  );
+  forceResetModels.delete(mappedModel);
+  return [...systemMsgs, ...head, toolSummary, ...tail];
+}
+
+function summarizeDiscardedTools(messages) {
+  const toolCounts = {};
+  let assistantCount = 0;
+  let toolResultCount = 0;
+  for (const msg of messages) {
+    if (!msg) continue;
+    if (msg.role === "assistant") {
+      assistantCount++;
+      if (Array.isArray(msg.tool_calls))
+        for (const tc of msg.tool_calls) {
+          const name = tc?.function?.name || tc?.name || "unknown";
+          toolCounts[name] = (toolCounts[name] || 0) + 1;
+        }
+    } else if (msg.role === "tool") {
+      toolResultCount++;
+    }
+  }
+  let summaryText =
+    "\n[Previous agent work (compressed for context):\n" +
+    assistantCount +
+    " assistant turns across " +
+    toolResultCount +
+    " tool executions]\n";
+  if (Object.keys(toolCounts).length > 0) {
+    const usage = Object.entries(toolCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(function (p) {
+        return "  " + p[0] + ": " + p[1] + "x";
+      })
+      .join("\n");
+    summaryText += "\nTool usage:\n" + usage;
+  }
+  return { role: "user", content: summaryText };
+}
+
+export function getOrCreateModelDefaultChat(model) {
+  const existing = modelDefaultChats.get(model);
+  if (existing && Date.now() - existing.timestamp < 3600000 * 24) {
+    return { chatId: existing.chatId, parentId: existing.parentId };
+  }
+  return null; // Will be created in resolveQwenChatId
+}
+
+export function saveModelDefaultChat(model, chatId, parentId) {
+  const existing = modelDefaultChats.get(model);
+  modelDefaultChats.set(model, {
+    chatId,
+    parentId,
+    timestamp: Date.now(),
+    toolCallCount: existing?.toolCallCount || 0,
+  });
+  logDebug(`Default чат для ${model}: ${chatId}`);
+}
+
+export function invalidateModelDefaultChat(model) {
+  const removed = modelDefaultChats.delete(model);
+  if (removed) {
+    logInfo(`🗑 Инвалидирован default-чат для ${model}: ${removed.chatId}`);
+  }
+  for (const [key, val] of chatIdMap.entries()) {
+    if (val === removed?.chatId) {
+      chatIdMap.delete(key);
+      logDebug(`Очищен маппинг: ${key} -> (удалён)`);
+    }
+  }
+  forceResetModels.add(model);
+}
+
+// Expose for auto-reset increment in routes
+export function getModelDefaultChats() {
+  return modelDefaultChats;
+}
+
+// ─── Chat ID Resolution ──────────────────────────────────────────────────────
+
+export function isChatNotExistError(result) {
+  const body = result?.details || "";
+  return typeof body === "string" && /not exist/i.test(body);
+}
+
+const chatIdMap = new Map();
+
+function mapChatId(generatedId, qwenChatId) {
+  if (generatedId) {
+    chatIdMap.set(generatedId, qwenChatId);
+    logDebug(`Маппинг чата: ${generatedId} -> ${qwenChatId}`);
+  }
+}
+
+function getChatIdFromMap(generatedId) {
+  return generatedId ? chatIdMap.get(generatedId) : null;
+}
+
+// ─── OpenWebUI Meta Request Detection ────────────────────────────────────────
+
+function isOpenWebUiMetaRequest(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  const lastUserMessage = messages.filter((m) => m && m.role === "user").pop();
+  if (!lastUserMessage) return false;
+
+  const content = lastUserMessage.content;
+  if (Array.isArray(content)) return false;
+  if (typeof content !== "string") return false;
+
+  const text = content.trimStart();
+
+  if (text.startsWith("### Task:")) return true;
+  if (text.startsWith("History:")) return true;
+
+  if (text.includes("<chat_history>") && text.includes("### Task:"))
+    return true;
+
+  return false;
+}
+export { isOpenWebUiMetaRequest };
+
+// ─── Chat ID Resolution (async) ──────────────────────────────────────────────
+
+export async function resolveQwenChatId(effectiveChatId, mappedModel) {
+  let qwenChatId = effectiveChatId;
+  const mapped = getChatIdFromMap(effectiveChatId);
+
+  if (mapped) {
+    qwenChatId = mapped;
+    logInfo(
+      `🔁 Используется сопоставленный Qwen chatId: ${qwenChatId} (from ${effectiveChatId})`,
+    );
+    return qwenChatId;
+  }
+
+  // If no effective ID or it's generated — try default for model
+  if (!qwenChatId || effectiveChatId?.startsWith("chat_")) {
+    const defaultForModel = getOrCreateModelDefaultChat(mappedModel);
+    if (defaultForModel) {
+      logInfo(
+        `♻️ Дефолтный Qwen чат для ${mappedModel}: ${defaultForModel.chatId}`,
+      );
+      qwenChatId = defaultForModel.chatId;
+
+      if (effectiveChatId && effectiveChatId.startsWith("chat_")) {
+        mapChatId(effectiveChatId, qwenChatId);
+      }
+    }
+  }
+
+  // Create new Qwen chat only if no mapping and no default for model
+  if (!qwenChatId && effectiveChatId && effectiveChatId.startsWith("chat_")) {
+    try {
+      const created = await createChatV2(mappedModel, "Сессия OpenWebUI");
+      if (created && created.chatId) {
+        mapChatId(effectiveChatId, created.chatId);
+        qwenChatId = created.chatId;
+
+        saveModelDefaultChat(mappedModel, qwenChatId, null);
+
+        logInfo(
+          `🔨 Создан Qwen chat ${qwenChatId} и привязан к ${effectiveChatId}`,
+        );
+      }
+    } catch (error) {
+      logDebug(
+        `Не удалось создать Qwen chat для ${effectiveChatId}: ${error.message}`,
+      );
+    }
+  }
+
+  return qwenChatId;
+}
+
+// ─── Scoped Sessions ──────────────────────────────────────────────────────────
+
+// Scoped-session tracking. Unscoped fallback only via ALLOW_UNSCOPED_SESSION_CHAT_RESTORE.
+const sessionToChatMap = new Map();
+
+function getSessionKey(req) {
+  const ip = req.ip || req.connection.remoteAddress || "unknown";
+  const userAgent = req.get("user-agent") || "unknown";
+  return crypto
+    .createHash("sha256")
+    .update(`${ip}||${userAgent}`)
+    .digest("hex");
+}
+
+function getScopedSessionKey(req, scope = null) {
+  const baseKey = getSessionKey(req);
+  const normalizedScope = normalizeIdValue(scope);
+  return normalizedScope ? `${baseKey}::${normalizedScope}` : baseKey;
+}
+
+export function getSavedChatId(req, scope = null) {
+  const keysToTry = [getScopedSessionKey(req, scope)];
+
+  for (const sessionKey of keysToTry) {
+    const sessionData = sessionToChatMap.get(sessionKey);
+    if (sessionData && Date.now() - sessionData.timestamp < 3600000) {
+      return sessionData;
+    }
+  }
+
+  return null;
+}
+
+export function saveChatIdForSession(req, chatId, parentId, scope = null) {
+  const sessionKey = getScopedSessionKey(req, scope);
+  const normalizedScope = normalizeIdValue(scope);
+
+  sessionToChatMap.set(sessionKey, {
+    chatId,
+    parentId,
+    scope: normalizedScope,
+    timestamp: Date.now(),
+  });
+
+  const scopeSuffix = normalizedScope ? ` (scope=${normalizedScope})` : "";
+  logDebug(
+    `Saved chatId ${chatId} for session ${sessionKey.substring(0, 8)}${scopeSuffix}`,
+  );
+}
+
+// ─── Chat ID Map Access ───────────────────────────────────────────────────────
+
+export function mapChatIdExport(generatedId, qwenChatId) {
+  if (generatedId) {
+    chatIdMap.set(generatedId, qwenChatId);
+    logDebug(`Маппинг чата: ${generatedId} -> ${qwenChatId}`);
+  }
+}
+
+// Expose forceResetModels for prepareOpenAIMessageInput
+export function getForceResetModels() {
+  return forceResetModels;
+}
+
+// Cleanup stale sessions every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  const oneHourAgo = now - 3600000;
+  let cleaned = 0;
+  for (const [key, value] of sessionToChatMap.entries()) {
+    if (value.timestamp < oneHourAgo) {
+      sessionToChatMap.delete(key);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    logDebug(`Очищено ${cleaned} старых сессий`);
+  }
+}, 600000);
