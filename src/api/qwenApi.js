@@ -3,8 +3,6 @@
 // Direct import of authToken — safe in ESM circular deps (top-level binding).
 import {
   authToken,
-  availableModels,
-  getAvailableModelsFromFile,
   extractAuthToken,
   browserTokenRateLimited,
   isValidModel,
@@ -680,8 +678,6 @@ export async function sendMessage(
   retryCount = 0,
   onChunk = null,
 ) {
-  if (!availableModels) availableModels = getAvailableModelsFromFile();
-
   if (!chatId) {
     const newChatResult = await createChatV2(model, "Новый чат", 0);
     if (newChatResult.error)
