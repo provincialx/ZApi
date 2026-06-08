@@ -204,14 +204,6 @@ async function startServer() {
       const displayHost = host === "0.0.0.0" ? "localhost" : host;
       logInfo(`Сервер запущен на ${host}:${port}`);
       logInfo(`API доступен по адресу: http://${displayHost}:${port}/api`);
-      logInfo("Для проверки статуса авторизации: GET /api/status");
-      logInfo("Для отправки сообщения: POST /api/chat");
-      logInfo("Для получения списка моделей: GET /api/models");
-      logInfo("======================================================");
-      logInfo("API v2 - История чатов хранится на серверах Qwen");
-      logInfo("Создать новый чат: POST /api/chats");
-      logInfo("Отправить сообщение: POST /api/chat (с chatId и parentId)");
-      logInfo("======================================================");
       logInfo("Доступно 25 моделей Qwen (через систему маппинга):");
       logInfo(
         "- Стандартные: qwen-max, qwen-plus, qwen-turbo и их latest-версии",
