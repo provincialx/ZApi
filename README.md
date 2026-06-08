@@ -1,7 +1,7 @@
 # FreeQwenApi — ForgetMeAI fork
 
 > **Локальный OpenAI-compatible прокси к Qwen Chat** от [t.me/forgetmeai](https://t.me/forgetmeai).  
-> Текст, модели Qwen 3.7, файлы, Open WebUI, Hermes/LiteLLM, а теперь ещё генерация изображений и видео через Qwen Chat.
+> Текст, модели Qwen 3.7, файлы, Open WebUI, генерация изображений и видео через Qwen Chat.
 
 ![ForgetMeAI](https://img.shields.io/badge/ForgetMeAI-t.me%2Fforgetmeai-blue)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-green)
@@ -24,7 +24,6 @@ http://localhost:3264/api
 - **Мультиаккаунты**: добавление, перелогин, удаление, статусы `OK` / `WAIT` / `INVALID`, автоматическая round-robin ротация при лимитах.
 - **Загрузка файлов**: upload endpoint для файлов и вложений Qwen.
 - **Open WebUI**: можно подключить как OpenAI-compatible backend.
-- **Hermes Agent / LiteLLM / Claude Code**: готовые примеры конфигов для локальных AI-агентов.
 - **Health/smoke tooling**: `/api/health`, `/api/status`, `/api/models`, `npm run smoke`, `npm run models:sync`.
 - **ForgetMeAI branding**: watermark `t.me/forgetmeai` в README, CLI и health metadata.
 
@@ -164,39 +163,7 @@ API Key: dummy-key
 
 Полная инструкция: [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md)
 
-## Hermes Agent / LiteLLM / Claude Code
 
-Hermes custom provider:
-
-```yaml
-custom_providers:
-  - name: qwen-free
-    base_url: http://localhost:3264/api
-    model: qwen3.7-max
-    api_key: dummy-key
-```
-
-Готовый пример: [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml)
-
-Для Hermes Agent прокси поддерживает OpenAI-compatible agent loop:
-
-- `/api/chat/completions` и `/api/v1/chat/completions` принимают `tools` / legacy `functions`;
-- ответы с вызовами инструментов возвращаются как настоящие `message.tool_calls` или streaming `delta.tool_calls` с `finish_reason: "tool_calls"`;
-- tool-result продолжения Hermes (`role: "tool"`) не ломают контекст: прокси сворачивает OpenAI transcript в понятный Qwen Chat prompt и продолжает ответ после результата инструмента;
-- для Qwen Chat это адаптер поверх веб-чата, поэтому tool schemas эмулируются через системный prompt, но наружный контракт для Hermes остаётся OpenAI-compatible.
-
-LiteLLM bridge для Claude Code:
-
-```yaml
-model_list:
-  - model_name: qwen3.7-max
-    litellm_params:
-      model: openai/qwen3.7-max
-      api_base: http://localhost:3264/api
-      api_key: dummy-key
-```
-
-Готовый пример: [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_litellm.yaml)
 
 ## Docker
 
@@ -258,8 +225,6 @@ curl http://localhost:3264/api/models
 - [docs/FORK_DEMO_QUICKSTART.md](docs/FORK_DEMO_QUICKSTART.md) — быстрый сценарий для демо.
 - [docs/QWEN_CHAT_MODELS.md](docs/QWEN_CHAT_MODELS.md) — отчёт синхронизации моделей Qwen Chat.
 - [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md) — подключение Open WebUI.
-- [examples/hermes/config-snippet.yaml](examples/hermes/config-snippet.yaml) — Hermes Agent provider.
-- [examples/litellm/qwen_litellm.yaml](examples/litellm/qwen_litellm.yaml) — LiteLLM bridge.
 
 ## Ограничения
 

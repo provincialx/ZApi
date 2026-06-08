@@ -53,7 +53,7 @@ Commit any changes and push to the repository.
 - Логирование тела ответа API — уровень `WARN` (не DEBUG).
 - `isChatNotExistError()` — проверяет `/not exist/i` в `result.details`.
 
-### 3.6 Message Folding (OpenAI/Hermes Compatibility)
+### 3.6 Message Folding (OpenAI Compatibility)
 - Если `hasOpenAIToolState(messages)` или `!effectiveChatId && nonSystemMessages.length > 1` — сворачивать всю историю в одно user-сообщение через `buildStatelessTranscript()`.
 - Qwen Chat не имеет роли `tool`, поэтому tool results передаются только через folded transcript или prompt injection.
 

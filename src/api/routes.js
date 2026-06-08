@@ -468,7 +468,7 @@ router.post("/chat/completions", async (req, res) => {
     const files = preparedInput.files || []; // ← ИЗВЛЕКАЕМ FILES
     if (preparedInput.folded) {
       logInfo(
-        "OpenAI/Hermes transcript folded into user message for context/tool-result preservation",
+        "OpenAI transcript folded into single user message for context/tool-result preservation",
       );
     }
 
