@@ -1458,12 +1458,6 @@ router.post("/chat/completions", async (req, res) => {
       ? systemMessage
       : applyToolPrompt(systemMessage, combinedTools, inAgentLoop);
 
-    if (toolAwareSystemMessage) {
-      logInfo(
-        `System message: ${toolAwareSystemMessage.substring(0, 50)}${toolAwareSystemMessage.length > 50 ? "..." : ""}`,
-      );
-    }
-
     // Сворачиваем историю, чтобы не превращать консоль в "потрошное месиво" при agent-loop (tool_calls)
     const roleCounts = {};
     messages.forEach((m) => {
@@ -2017,12 +2011,6 @@ router.post("/v1/chat/completions", async (req, res) => {
     const toolAwareSystemMessage = allFailed
       ? systemMessage
       : applyToolPrompt(systemMessage, combinedTools, inAgentLoop);
-
-    if (toolAwareSystemMessage) {
-      logInfo(
-        `System message: ${toolAwareSystemMessage.substring(0, 50)}${toolAwareSystemMessage.length > 50 ? "..." : ""}`,
-      );
-    }
 
     // Сворачиваем историю, чтобы не превращать консоль в "потрошное месиво" при agent-loop (tool_calls)
     const roleCounts = {};

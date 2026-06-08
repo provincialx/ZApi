@@ -1,5 +1,3 @@
-NEVER modify, compress, or rewrite this file. This is sacred. Hands off.
-
 Read full documents at the entrance .md and update any changes.
 Commit any changes and push to the repository.
 
@@ -11,6 +9,7 @@ Commit any changes and push to the repository.
 - Эмулирует вызовы Qwen через JS `fetch` внутри puppeteer-страницы.
 - Целевой клиент — Zed Agent (Browser), но поддерживает любой OpenAI-compatible клиент.
 - **Терминальные обёртки (Aider и т.д.) исключены** — цель: полноценный agent с tool_calls через интерфейс Zed.
+- **Актуальные модели**: qwen3.7-max, qwen3.7-plus, qwen3.6-plus, qwen3.5-plus/flash, qwen3-max, qwen3-coder-plus.
 
 ## 2. Architecture & Stack
 - **Runtime**: Node.js (ES Modules), Express.
@@ -27,18 +26,19 @@ Commit any changes and push to the repository.
 - **Парсинг ответа**: ответ Qwen приходит как JSON-текст. Парсить через `parseToolCallJson()` из `toolUtils.js` обратно в OpenAI `message.tool_calls`.
 - **Не дублировать** логику tool prompt / parse между файлами — вся логика централизована в `toolUtils.js`.
 - При streaming с tool calls: `captureToolCalls = true` отключает обычный streaming callback, ответ собирается целиком для парсинга.
+- В agent-loop (когда есть tool results) использовать `toolsToLightPrompt()` вместо полного `toolsToPrompt()`.
 
 ### 3.2 Sliding Window & History
 - При `messages.length > 60` — срез до System Prompt + последние 40 сообщений.
 - **Обязательное условие**: если после `.slice(-40)` первое сообщение имеет `role: "tool"`, **добавить предшествующий `assistant` с `tool_calls`** в начало среза. Иначе Qwen теряет контекст вызова и ломается agent-loop.
-- Логирование истории: вместо бесконечной строки ролей использовать сводку: `273 сообщений (1x system, 85x user, 86x assistant, 101x tool)`.
+- Логирование истории: использовать сводку с подсчётом ролей: `273 сообщений (1x system, 85x user, 86x assistant, 101x tool)`.
 
 ### 3.3 Chat ID Resolution (Layered Fallback)
 Порядок разрешения `effectiveChatId` → `qwenChatId` (функция `resolveQwenChatId`):
 1. `chatIdMap` (глобальный маппинг generated→qwen)
 2. `modelDefaultChats` (один чат на модель для агентов без conversation_id)
 3. Создание нового чата через `createChatV2()` + сохранение в маппинг и default
-- **Функция `resolveQwenChatId` всегда должна возвращать `qwenChatId`** (раньше был баг с отсутствием `return`).
+- **Функция `resolveQwenChatId` всегда должна возвращать `qwenChatId`** (проверено: return на строке 351).
 - При `forceNewChat` — генерировать новый `chat_` ID, сбрасывать `parentId`.
 - При ошибке `"chat_not_exist"` от Qwen: инвалидировать `modelDefaultChats` и `chatIdMap`, создать свежий чат, повторить запрос **ровно один раз** (`retryCount === 0`).
 
@@ -64,18 +64,29 @@ Commit any changes and push to the repository.
 - `STREAMING_CHUNK_DELAY` между чанками.
 
 ## 4. File Responsibilities
-- `src/api/routes.js` — OpenAI-compatible endpoints (`/chat/completions`, `/v1/chat/completions`), sliding window, routing.
-- `src/api/chat.js` — отправка сообщений в Qwen через Puppeteer, retry-логика, error handling, `evaluateWithTimeout`.
-- `src/api/toolUtils.js` — **единственное** место для `applyToolPrompt`, `parseToolCallJson`, `toolsToPrompt`, `truncateForPrompt`, `compactJsonSchema`.
-- `src/browser/browser.js` — инициализация Puppeteer, `protocolTimeout`, page pool.
+- `src/api/routes.js` — OpenAI-compatible endpoints (`/chat/completions`, `/v1/chat/completions`), sliding window, routing, image/video generation endpoints.
+- `src/api/chat.js` — отправка сообщений в Qwen через Puppeteer, retry-логика, error handling, `evaluateWithTimeout`, page pool.
+- `src/api/toolUtils.js` — **единственное** место для `applyToolPrompt`, `parseToolCallJson`, `toolsToPrompt`, `toolsToLightPrompt`, `truncateForPrompt`, `compactJsonSchema`.
+- `src/browser/browser.js` — инициализация Puppeteer, `protocolTimeout`, stealth-антидетект, ручная авторизация.
 - `src/browser/auth.js` — проверка аутентификации Qwen.
+- `src/browser/session.js` — сохранение cookies/tokens.
 - `src/api/tokenManager.js` — ротация аккаунтов, статусы (OK, RATELIMIT, INVALID).
 - `src/api/chatHistory.js` — локальное хранение истории (JSON).
-- `src/config.js` — константы: `MAX_FILE_SIZE`, `UPLOADS_DIR`, `DEFAULT_MODEL`, `STREAMING_CHUNK_DELAY`, `ALLOW_UNSCOPED_SESSION_CHAT_RESTORE`.
+- `src/api/fileUpload.js` — загрузка файлов через STS token + OSS.
+- `src/api/imageGeneration.js` — генерация изображений (DashScope/Qwen).
+- `src/api/modelMapping.js` — маппинг имён моделей.
+- `src/config.js` — константы: таймауты, лимиты, пути, настройки сервера.
+- `src/utils/branding.js` — водяной знак ForgetMeAI.
+- `src/utils/prompt.js` — утилиты для промптов.
+- `src/utils/accountSetup.js` — настройка аккаунтов.
 
 ## 5. Logging Standards
-- Использовать только `logInfo()`, `logError()`, `logDebug()` из `src/logger/index.js`.
-- Никаких `console.log`/`console.error` в production коде.
+- Использовать `logInfo()`, `logError()`, `logWarn()`, `logDebug()` из `src/logger/index.js`.
+- **Исключения для `console.log`**: допустимы ТОЛЬКО в:
+  - `src/browser/browser.js` (строки 207-217) — интерактивный CLI-вывод для ручной авторизации.
+  - `src/api/toolUtils.js` (строка 108) — debug-trace парсинга tool calls (`[TOOL_PARSE]`).
+  - `index.js` / `scripts/` — startup-сообщения и CLI-скрипты.
+- В остальном production-коде (`routes.js`, `chat.js`, `tokenManager.js`) — **только логгер**.
 - Формат логов: эмодзи-префикс для быстрой идентификации (`🔁`, `♻️`, `🔨`, `🗑`).
 
 ## 6. Testing Checklist (Smoke Test)
@@ -89,8 +100,9 @@ Commit any changes and push to the repository.
 ## 7. Tech Debt & Known Issues (Do Not Introduce New Debt)
 - `removeInvalidToken` imported but unused в `chat.js` — не добавлять новые unused imports.
 - Node-streaming использует глобальный `fetch`. На старых Node может отсутствовать. Fallback к browser fetch уже есть, но явная проверка `typeof fetch` предпочтительнее.
-- Память браузера растёт при длительном agent-loop (>100 вызовов). Нет hard limit на размер пула + автоматический перезапуск Chromium. PAGE_POOL_SIZE=3 помогает, но старые страницы не GC-нуты пока в массиве. При добавлении max-age на страницы — учитывать это ограничение.
+- Память браузера растёт при длительном agent-loop (>100 вызовов). Нет hard limit на размер пула + автоматический перезапуск Chromium. PAGE_POOL_SIZE=3 помогает, но старые страницы не GC-нуты пока в массиве.
 - `testToken` импортирован в `routes.js` — используется только в `/status`. Не размножать token-test логику вне `tokenManager.js`.
+- `Target.closeTarget: Target closed` в error.log — известная ошибка при закрытии страниц в пуле. Не критично, но указывает на необходимость health-check.
 
 ## 8. Prohibited Patterns
 - ❌ Передавать `tools[]` в нативном OpenAI формате в `sendMessage()` — Qwen web API их не понимает.
@@ -98,7 +110,7 @@ Commit any changes and push to the repository.
 - ❌ Использовать `page.evaluate()` без таймаута — всегда через `evaluateWithTimeout()`.
 - ❌ Возвращать `undefined` из `handleApiError()` или `resolveQwenChatId()`.
 - ❌ Рвать tool_call/tool_result пары в sliding window.
-- ❌ Использовать `console.log` вместо логгера.
+- ❌ Использовать `console.log` вместо логгера (кроме исключений в §5).
 - ❌ Делать `goto()` без retry-loop при сетевых операциях.
 
 ## Caveman Mode

@@ -1150,8 +1150,11 @@ export async function sendMessage(
       chatType,
       size,
     );
-    logDebug("=== PAYLOAD V2 ===\n" + JSON.stringify(payload, null, 2));
     logDebug(
+      `Отправка запроса к API v2 (model: ${payload.model}, chat_id: ${payload.chat_id})`,
+    );
+    // logDebug("=== PAYLOAD V2 ===\n" + JSON.stringify(payload, null, 2)); // Disabled to reduce spam
+    logInfo(
       `Отправка сообщения в чат ${chatId} с parent_id: ${parentId || "null"}`,
     );
 
@@ -1260,17 +1263,7 @@ export async function sendMessage(
         response.data.choices?.[0]?.message?.content
       ) {
         onChunk(response.data.choices[0].message.content);
-      } else {
-        const dbgContent = response.data.choices?.[0]?.message?.content;
-        logInfo(
-          "CAPTURE MODE: content type=" +
-            typeof dbgContent +
-            ", len=" +
-            (dbgContent?.length ?? 0) +
-            ", preview=" +
-            JSON.stringify(dbgContent).substring(0, 200),
-        );
-      }
+
 
       return response.data;
     } else {
