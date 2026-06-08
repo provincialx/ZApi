@@ -456,6 +456,60 @@ export function getForceResetModels() {
   return forceResetModels;
 }
 
+// ─── Session Persistence (shared by streaming + non-streaming) ───────────────
+// Extracts the ~46-line duplicate block that ran in both /chat/completions paths.
+export function persistSessionState(
+  result,
+  qwenChatId,
+  isMeta,
+  effectiveChatId,
+  conversationScope,
+  mappedModel,
+  req,
+  effectiveParentId,
+) {
+  const resolvedChatId = result.chatId || qwenChatId;
+
+  if (isMeta || !resolvedChatId) return;
+
+  // Map generated export ID → Qwen internal ID
+  if (
+    effectiveChatId &&
+    effectiveChatId.startsWith("chat_") &&
+    resolvedChatId
+  ) {
+    mapChatIdExport(effectiveChatId, resolvedChatId);
+    logDebug(`Маппинг сохранён: ${effectiveChatId} -> ${resolvedChatId}`);
+  }
+
+  // Persist to scoped session storage
+  if (shouldPersistSessionContext(conversationScope)) {
+    saveChatIdForSession(
+      req,
+      resolvedChatId,
+      result.parentId,
+      conversationScope,
+    );
+  }
+
+  // Update model default chat — next request without chatId reuses it
+  const existing = getOrCreateModelDefaultChat(mappedModel);
+  if ((existing && existing.chatId === resolvedChatId) || result.newChatId) {
+    saveModelDefaultChat(
+      mappedModel,
+      resolvedChatId,
+      result.parentId || effectiveParentId,
+    );
+    if (result.newChatId) {
+      logInfo(
+        `♻️ Обновлён default-чат после создания нового: ${resolvedChatId} для ${mappedModel}`,
+      );
+    } else {
+      logDebug(`Обновлён parentId в default-чате: ${result.parentId}`);
+    }
+  }
+}
+
 // Cleanup stale sessions every 10 minutes
 setInterval(() => {
   const now = Date.now();

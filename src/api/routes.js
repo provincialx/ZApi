@@ -26,17 +26,13 @@ import {
   extractConversationHint,
   extractParentHint,
   shouldForceNewChat,
-  shouldPersistSessionContext,
-  getOrCreateModelDefaultChat,
-  saveModelDefaultChat,
   invalidateModelDefaultChat,
   resolveQwenChatId,
   isOpenWebUiMetaRequest,
   getSavedChatId,
-  saveChatIdForSession,
-  mapChatIdExport,
   getModelDefaultChats,
   TOOL_CALL_RESET_THRESHOLD,
+  persistSessionState,
 } from "./chatSession.js";
 
 // ─── OpenAI Message Processing ─────────────────────────────────────────────
@@ -417,48 +413,16 @@ router.post("/chat/completions", async (req, res) => {
           }
         }
 
-        // Сохраняем chatId в сессию для следующих запросов
-        const resolvedChatId = result.chatId || qwenChatId;
-        if (!isMeta && resolvedChatId) {
-          if (
-            effectiveChatId &&
-            effectiveChatId.startsWith("chat_") &&
-            resolvedChatId
-          ) {
-            mapChatIdExport(effectiveChatId, resolvedChatId);
-            logDebug(
-              `Маппинг сохранён: ${effectiveChatId} -> ${resolvedChatId}`,
-            );
-          }
-          if (shouldPersistSessionContext(conversationScope)) {
-            saveChatIdForSession(
-              req,
-              resolvedChatId,
-              result.parentId,
-              conversationScope,
-            );
-          }
-
-          // Обновляем дефолтный чат модели — следующий request без chatId reused его
-          const existing = getOrCreateModelDefaultChat(mappedModel);
-          if (
-            (existing && existing.chatId === resolvedChatId) ||
-            result.newChatId
-          ) {
-            saveModelDefaultChat(
-              mappedModel,
-              resolvedChatId,
-              result.parentId || effectiveParentId,
-            );
-            if (result.newChatId) {
-              logInfo(
-                `♻️ Обновлён default-чат после создания нового: ${resolvedChatId} для ${mappedModel}`,
-              );
-            } else {
-              logDebug(`Обновлён parentId в default-чате: ${result.parentId}`);
-            }
-          }
-        }
+        persistSessionState(
+          result,
+          qwenChatId,
+          isMeta,
+          effectiveChatId,
+          conversationScope,
+          mappedModel,
+          req,
+          effectiveParentId,
+        );
 
         // Warn: модель получила инструменты но не использовала
         if (
@@ -554,46 +518,16 @@ router.post("/chat/completions", async (req, res) => {
         finalSystemMessage,
       );
 
-      // Сохраняем chatId в сессию для следующих запросов
-      const resolvedChatId = result.chatId || qwenChatId;
-      if (!isMeta && resolvedChatId) {
-        if (
-          effectiveChatId &&
-          effectiveChatId.startsWith("chat_") &&
-          resolvedChatId
-        ) {
-          mapChatIdExport(effectiveChatId, resolvedChatId);
-          logDebug(`Маппинг сохранён: ${effectiveChatId} -> ${resolvedChatId}`);
-        }
-        if (shouldPersistSessionContext(conversationScope)) {
-          saveChatIdForSession(
-            req,
-            resolvedChatId,
-            result.parentId,
-            conversationScope,
-          );
-        }
-
-        // Обновляем дефолтный чат модели
-        const existingDefault = getOrCreateModelDefaultChat(mappedModel);
-        if (
-          (existingDefault && existingDefault.chatId === resolvedChatId) ||
-          result.newChatId
-        ) {
-          saveModelDefaultChat(
-            mappedModel,
-            resolvedChatId,
-            result.parentId || effectiveParentId,
-          );
-          if (result.newChatId) {
-            logInfo(
-              `♻️ Обновлён default-чат после создания нового: ${resolvedChatId} для ${mappedModel}`,
-            );
-          } else {
-            logDebug(`Обновлён parentId в default-чате: ${result.parentId}`);
-          }
-        }
-      }
+      persistSessionState(
+        result,
+        qwenChatId,
+        isMeta,
+        effectiveChatId,
+        conversationScope,
+        mappedModel,
+        req,
+        effectiveParentId,
+      );
 
       if (result.error) {
         return res.status(500).json({
