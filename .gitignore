@@ -4,7 +4,7 @@ package-lock.json
 yarn.lock
 
 # Данные сессии и кэш
-session/
+session/*
 .cache/
 
 
@@ -17,6 +17,7 @@ session/
 .env.production.local
 
 # Логи
+/logs/*
 logs
 *.log
 npm-debug.log*
@@ -40,3 +41,4 @@ venv/
 
 src/Authorization.txt
 nul
+accounts

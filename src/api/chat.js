@@ -1263,8 +1263,7 @@ export async function sendMessage(
         response.data.choices?.[0]?.message?.content
       ) {
         onChunk(response.data.choices[0].message.content);
-
-
+      }
       return response.data;
     } else {
       const apiResult = await handleApiError(

@@ -245,6 +245,72 @@ const modelDefaultChats = new Map(); // model -> {chatId, parentId, timestamp, t
 const TOOL_CALL_RESET_THRESHOLD =
   Number(process.env.TOOL_CALL_RESET_THRESHOLD) || 8;
 
+// Tracks models invalidated by auto-reset. Force Folding applied on NEXT request.
+const forceResetModels = new Set();
+const FORCE_FOLD_HEAD = 5;
+const FORCE_FOLD_TAIL = 10;
+
+function applyForceFolding(messages, mappedModel) {
+  if (!forceResetModels.has(mappedModel)) return messages;
+  const systemMsgs = messages.filter((m) => m?.role === "system");
+  let nonSys = messages.filter((m) => m?.role !== "system");
+  if (nonSys.length < FORCE_FOLD_HEAD + FORCE_FOLD_TAIL) {
+    forceResetModels.delete(mappedModel);
+    return messages;
+  }
+  const head = nonSys.slice(0, FORCE_FOLD_HEAD);
+  const tailStart = Math.max(FORCE_FOLD_HEAD, nonSys.length - FORCE_FOLD_TAIL);
+  const tail = nonSys.slice(tailStart);
+  const discarded = nonSys.slice(FORCE_FOLD_HEAD, tailStart);
+  const toolSummary = summarizeDiscardedTools(discarded);
+  logInfo(
+    "🔁 Force Folding: " +
+      messages.length +
+      "→" +
+      (head.length + tail.length) +
+      " msgs. " +
+      discarded.length +
+      " turns compressed",
+  );
+  forceResetModels.delete(mappedModel);
+  return [...systemMsgs, ...head, toolSummary, ...tail];
+}
+
+function summarizeDiscardedTools(messages) {
+  const toolCounts = {};
+  let assistantCount = 0;
+  let toolResultCount = 0;
+  for (const msg of messages) {
+    if (!msg) continue;
+    if (msg.role === "assistant") {
+      assistantCount++;
+      if (Array.isArray(msg.tool_calls))
+        for (const tc of msg.tool_calls) {
+          const name = tc?.function?.name || tc?.name || "unknown";
+          toolCounts[name] = (toolCounts[name] || 0) + 1;
+        }
+    } else if (msg.role === "tool") {
+      toolResultCount++;
+    }
+  }
+  let summaryText =
+    "\n[Previous agent work (compressed for context):\n" +
+    assistantCount +
+    " assistant turns across " +
+    toolResultCount +
+    " tool executions]\n";
+  if (Object.keys(toolCounts).length > 0) {
+    const usage = Object.entries(toolCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(function (p) {
+        return "  " + p[0] + ": " + p[1] + "x";
+      })
+      .join("\n");
+    summaryText += "\nTool usage:\n" + usage;
+  }
+  return { role: "user", content: summaryText };
+}
+
 function getOrCreateModelDefaultChat(model) {
   const existing = modelDefaultChats.get(model);
   if (
@@ -278,6 +344,7 @@ function invalidateModelDefaultChat(model) {
       logDebug(`Очищен маппинг: ${key} -> (удалён)`);
     }
   }
+  forceResetModels.add(model);
 }
 
 function isChatNotExistError(result) {
@@ -659,7 +726,29 @@ function shouldFoldOpenAITranscript(messages, combinedTools, effectiveChatId) {
   return false;
 }
 
-function prepareOpenAIMessageInput(messages, combinedTools, effectiveChatId) {
+function prepareOpenAIMessageInput(
+  messages,
+  combinedTools,
+  effectiveChatId,
+  rawModel = null,
+) {
+  // Force Folding: compress accumulated tool history after auto-reset
+  if (rawModel && hasOpenAIToolState(messages)) {
+    const mm = getMappedModel(rawModel);
+    if (forceResetModels.has(mm)) {
+      const originalCount = messages.length;
+      messages = applyForceFolding(messages, mm);
+      if (messages.length !== originalCount)
+        logDebug(
+          "Force Folding applied: " +
+            originalCount +
+            "→" +
+            messages.length +
+            " msgs",
+        );
+    }
+  }
+
   const lastUserMessage = (messages || [])
     .filter((msg) => msg && msg.role === "user")
     .pop();
@@ -1384,6 +1473,7 @@ router.post("/chat/completions", async (req, res) => {
       messages,
       combinedTools,
       effectiveChatId,
+      model,
     );
     if (preparedInput.missingUser) {
       logError("В запросе нет сообщений от пользователя");
@@ -1933,6 +2023,7 @@ router.post("/v1/chat/completions", async (req, res) => {
       messages,
       combinedTools,
       effectiveChatId,
+      model,
     );
     if (preparedInput.missingUser) {
       logError("В запросе нет сообщений от пользователя");
