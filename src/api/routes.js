@@ -421,10 +421,12 @@ router.post("/chat/completions", async (req, res) => {
           streamingCallback,
         );
 
+        // Parse tool calls — always capture the parsed result for fallback use.
+        // When Qwen returns text like "Привет" + {"tool_calls":[]}, we need
+        // parts.visible (stripped of JSON marker) instead of raw content.
+        let parts = null;
         if (captureToolCalls) {
-          const parts = parseToolCallParts(
-            result?.choices?.[0]?.message?.content,
-          );
+          parts = parseToolCallParts(result?.choices?.[0]?.message?.content);
           const rawCalls = parts.calls || [];
           const toolCalls = normalizeToolCalls(rawCalls);
           if (toolCalls && toolCalls.length > 0) {
@@ -527,8 +529,13 @@ router.post("/chat/completions", async (req, res) => {
           result.choices[0].message &&
           result.choices[0].message.content
         ) {
-          // Qwen вернул JSON/обычный ответ вместо SSE - отправляем контент одним чанком
-          const content = result.choices[0].message.content;
+          // Qwen вернул JSON/обычный ответ вместо SSE - отправляем контент одним чанком.
+          // When we parsed tool calls and got visible text (stripped of JSON marker),
+          // use that to prevent leaking {"tool_calls":[]} into the user-visible response.
+          let content = result.choices[0].message.content;
+          if (parts?.visible !== null && parts.visible !== undefined) {
+            content = parts.visible || content;
+          }
           logDebug(`JSON response content length: ${content.length}`);
           if (typeof streamingCallback === "function") {
             streamingCallback(content);
@@ -603,8 +610,12 @@ router.post("/chat/completions", async (req, res) => {
         });
       }
 
-      const parts = parseToolCallParts(result?.choices?.[0]?.message?.content);
-      const rawCalls = parts.calls || [];
+      let parts = null;
+      if (Array.isArray(combinedTools) && combinedTools.length > 0) {
+        // When tools are present, parse to strip empty {"tool_calls":[]} markers
+        parts = parseToolCallParts(result?.choices?.[0]?.message?.content);
+      }
+      const rawCalls = parts ? parts.calls || [] : [];
       const toolCalls = normalizeToolCalls(rawCalls);
 
       // Auto-reset: increment on tool_calls, defer until loop ends.
@@ -645,21 +656,27 @@ router.post("/chat/completions", async (req, res) => {
         }
       }
 
+      // Use stripped content when we parsed tool call markers but got empty array
+      let responseContent = result.choices?.[0]?.message?.content || "";
+      if (parts?.visible !== null && parts.visible !== undefined) {
+        responseContent = parts.visible || responseContent;
+      }
+
       const openaiResponse = {
         id: result.id || "chatcmpl-" + Date.now(),
         object: "chat.completion",
         created: Math.floor(Date.now() / 1000),
         model: result.model || mappedModel || "qwen-max-latest",
-        choices: result.choices || [
-          {
-            index: 0,
-            message: {
-              role: "assistant",
-              content: result.choices?.[0]?.message?.content || "",
-            },
-            finish_reason: "stop",
-          },
-        ],
+        choices:
+          result.choices?.[0]?.message?.content === responseContent
+            ? result.choices
+            : [
+                {
+                  index: 0,
+                  message: { role: "assistant", content: responseContent },
+                  finish_reason: "stop",
+                },
+              ],
         usage: result.usage || {
           prompt_tokens: 0,
           completion_tokens: 0,

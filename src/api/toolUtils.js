@@ -91,8 +91,9 @@ RULES:
 - When user asks to RUN commands/search/deploy → ALWAYS call terminal/process/web_search
 - You have tool results but NEED MORE DATA → CALL next tool NOW
 - Only give plain text answer when task is COMPLETE and verified
+- If no action needs tools (greeting, explanation, summary) → write plain text WITHOUT any JSON
 
-FORMAT: minified JSON as LAST LINE (no markdown, no extra spaces):
+When a tool call IS needed, add this minified JSON as LAST LINE (no markdown, no extra spaces):
 {"tool_calls":[{"name":"<tool_name>","arguments":{}}]}
 Available tools: ${toolNames}${skillRules}`;
 }
@@ -390,9 +391,9 @@ You are in AGENT LOOP with tools. Your task is to EXECUTE actions, not explain t
 - NEVER output "Терминал недоступен" or similar errors as your own message — those are TOOL results, call next step
 - User wants to READ/CREATE files → CALL matching file tool NOW
 - User wants RUN commands → CALL terminal/process NOW
-- Task COMPLETE → Write plain text answer with findings
+- Task COMPLETE → Write plain text answer with findings WITHOUT any JSON
 
-FORMAT: minified JSON on LAST LINE (no markdown):
+When you NEED to call another tool, add this minified JSON on LAST LINE (no markdown):
 {"tool_calls":[{"name":"<tool_name>","arguments":{}}]}
 Available tools: ${toolNames}`;
 }
