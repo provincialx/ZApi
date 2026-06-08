@@ -32,6 +32,7 @@ export async function initBrowser(
 ) {
   if (browserInstance) return true;
 
+  logInfo("Инициализация браузера с Puppeteer Stealth...");
   try {
     browserInstance = await puppeteer.launch({
       headless: !visibleMode,
@@ -157,6 +158,7 @@ export async function initBrowser(
     });
 
     browserContext = page;
+    logInfo("Браузер инициализирован с максимальной защитой от обнаружения");
 
     if (visibleMode) {
       await startManualAuthenticationPuppeteer(page, skipManualRestart);
