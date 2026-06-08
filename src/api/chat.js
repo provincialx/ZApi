@@ -6,11 +6,15 @@ import {
 import { checkAuthentication, checkVerification } from "../browser/auth.js";
 import { shutdownBrowser, initBrowser } from "../browser/browser.js";
 import { saveAuthToken } from "../browser/session.js";
-import {
-  getAvailableToken,
-  markRateLimited,
-  removeInvalidToken,
-} from "./tokenManager.js";
+// Re-exported for backward compatibility (fileUpload.js, browser.js, auth.js import here):
+export {
+  pagePool,
+  createPage,
+  evaluateWithTimeout,
+  EVALUATE_HEALTH_TIMEOUT,
+} from "../browser/pagePool.js";
+import { setAuthTokenGetter } from "../browser/pagePool.js";
+import { getAvailableToken, markRateLimited } from "./tokenManager.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -24,7 +28,6 @@ import {
   TASK_STATUS_URL,
   PAGE_TIMEOUT,
   RETRY_DELAY,
-  PAGE_POOL_SIZE,
   DEFAULT_MODEL,
   MAX_RETRY_COUNT,
   TASK_POLL_MAX_ATTEMPTS,
@@ -42,174 +45,13 @@ let availableModels = null;
 let authKeys = null;
 let browserTokenRateLimited = false;
 
+// Wire pagePool with a callback to check cached token before extracting on fresh pages
+setAuthTokenGetter(() => authToken);
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// ─── Page helpers ────────────────────────────────────────────────────────────
-
-async function getPage(context) {
-  if (context && typeof context.newPage === "function") {
-    return await context.newPage();
-  }
-
-  if (context && typeof context.goto === "function") {
-    // Если передана Puppeteer Page, не переиспользуем её как рабочую:
-    // создаём отдельную вкладку из того же браузера, чтобы избежать гонок
-    // и случайного закрытия базовой страницы.
-    if (typeof context.browser === "function") {
-      try {
-        const browser = context.browser();
-        if (browser && typeof browser.newPage === "function") {
-          return await browser.newPage();
-        }
-      } catch (error) {
-        logWarn(
-          `Не удалось создать новую страницу из текущего контекста: ${error.message}`,
-        );
-      }
-    }
-
-    if (typeof context.isClosed === "function" && context.isClosed()) {
-      throw new Error("Базовая страница браузера закрыта");
-    }
-
-    return context;
-  }
-
-  throw new Error(
-    "Неверный контекст: не страница Puppeteer, не контекст Playwright",
-  );
-}
-
-// ─── Evaluate with timeout helper ────────────────────────────────────────────
-// page.evaluate без таймаута блокирует пул страниц бесконечно.
-// Promise.race выбрасывает Error если CDP-соединение деградировало.
-const EVALUATE_HEALTH_TIMEOUT =
-  Number(process.env.EVALUATE_HEALTH_TIMEOUT) || 5_000;
-
-async function evaluateWithTimeout(
-  page,
-  fn,
-  timeoutMs = EVALUATE_HEALTH_TIMEOUT,
-) {
-  return Promise.race([
-    page.evaluate(fn),
-    new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`page.evaluate timed out after ${timeoutMs}ms`)),
-        timeoutMs,
-      ),
-    ),
-  ]);
-}
-
-export const pagePool = {
-  pages: [],
-  maxSize: PAGE_POOL_SIZE,
-
-  async getPage(context) {
-    const baseContext = getBrowserContext();
-    while (this.pages.length > 0) {
-      const page = this.pages.pop();
-      try {
-        if (page === baseContext) {
-          logWarn("Базовая страница не должна быть в пуле, пропускаем");
-          continue;
-        }
-        if (page.isClosed()) {
-          logWarn("Страница из пула закрыта, пропускаем");
-          continue;
-        }
-        // Ограничиваем health-check таймаутом: если CDP-соединение
-        // деградировало, страница умрёт быстро вместо вечного зависания.
-        await evaluateWithTimeout(page, () => document.readyState);
-        return page;
-      } catch (e) {
-        logWarn(
-          `Страница из пула протухла (${e.message?.substring(0, 60)}), создаём новую`,
-        );
-        if (page !== baseContext) {
-          try {
-            await page.close();
-          } catch {
-            /* already dead */
-          }
-        }
-      }
-    }
-
-    // Retry goto up to 3 times with exponential backoff on network errors.
-    const maxGotoAttempts = 3;
-    let lastError;
-    for (let attempt = 1; attempt <= maxGotoAttempts; attempt++) {
-      try {
-        const newPage = await getPage(context);
-        await newPage.goto(CHAT_PAGE_URL, {
-          waitUntil: "domcontentloaded",
-          timeout: PAGE_TIMEOUT,
-        });
-
-        // Extract token on fresh page if not yet cached.
-        if (!authToken) {
-          try {
-            authToken = await newPage.evaluate(() =>
-              localStorage.getItem("token"),
-            );
-            logInfo("Токен авторизации получен из браузера");
-            if (authToken) {
-              saveAuthToken(authToken);
-            }
-          } catch (e) {
-            logError("Ошибка при получении токена авторизации", e);
-          }
-        }
-
-        return newPage;
-      } catch (e) {
-        lastError = e;
-        logWarn(
-          `goto CHAT_PAGE_URL попытка ${attempt}/${maxGotoAttempts} не удалась: ${e.message?.substring(0, 80)}`,
-        );
-        if (attempt < maxGotoAttempts) {
-          await delay(RETRY_DELAY * attempt); // exponential backoff
-        }
-      }
-    }
-    throw lastError;
-  },
-
-  releasePage(page) {
-    try {
-      if (page.isClosed()) return;
-    } catch {
-      return;
-    }
-
-    const baseContext = getBrowserContext();
-    if (page === baseContext) {
-      // Базовую страницу держим отдельно от пула.
-      return;
-    }
-
-    if (this.pages.length < this.maxSize) {
-      this.pages.push(page);
-    } else {
-      page.close().catch((e) => logError("Ошибка при закрытии страницы", e));
-    }
-  },
-
-  async clear() {
-    const baseContext = getBrowserContext();
-    for (const page of this.pages) {
-      if (page === baseContext) continue;
-      try {
-        await page.close();
-      } catch (e) {
-        logError("Ошибка при закрытии страницы в пуле", e);
-      }
-    }
-    this.pages = [];
-  },
-};
+// pagePool, evaluateWithTimeout, createPage — imported from browser/pagePool.js
+// Re-exported above for backward compatibility.
 
 // ─── Task polling ────────────────────────────────────────────────────────────
 
@@ -303,7 +145,7 @@ export async function extractAuthToken(context, forceRefresh = false) {
   if (authToken && !forceRefresh) return authToken;
 
   try {
-    const page = await getPage(context);
+    const page = await createPage(context);
     const shouldClosePage = page !== context;
     try {
       await page.goto(CHAT_PAGE_URL, {
@@ -1571,7 +1413,7 @@ export async function testToken(token) {
   let page;
   let shouldClosePage = false;
   try {
-    page = await getPage(browserContext);
+    page = await createPage(browserContext);
     shouldClosePage = page !== browserContext;
     await page.goto(CHAT_PAGE_URL, { waitUntil: "domcontentloaded" });
 

@@ -2,7 +2,8 @@ import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { saveSession, saveAuthToken } from "./session.js";
 import { startManualAuthentication } from "./auth.js";
-import { clearPagePool, getAuthToken } from "../api/chat.js";
+import { pagePool } from "./pagePool.js";
+import { getAuthToken } from "../api/chat.js";
 import fs from "fs";
 import path from "path";
 import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
@@ -295,7 +296,7 @@ export async function restartBrowserInHeadlessMode() {
 export async function shutdownBrowser() {
   try {
     try {
-      await clearPagePool();
+      await pagePool.clear();
     } catch (e) {
       logError("Ошибка при очистке пула страниц", e);
     }
