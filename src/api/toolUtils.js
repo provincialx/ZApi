@@ -85,15 +85,15 @@ export function toolsToPrompt(tools) {
 
   return `
 === TOOL USAGE RULES ===
-DECISION TREE:
-- User wants to READ/CREATE/MODIFY files → CALL a tool NOW
-- User wants to RUN commands/search/deploy → CALL a tool NOW
-- User asks questions or explains concepts → ANSWER in plain text
-- You have tool results but need MORE data → CALL another tool NOW
+RULES:
+- NEVER explain tool errors in text output. If a tool returns an error, CALL another tool with corrected arguments or give final answer.
+- When user asks to READ/CREATE/MODIFY files → ALWAYS call matching tool
+- When user asks to RUN commands/search/deploy → ALWAYS call terminal/process/web_search
+- You have tool results but NEED MORE DATA → CALL next tool NOW
+- Only give plain text answer when task is COMPLETE and verified
 
-FORMAT: output minified JSON as the LAST LINE of your response:
+FORMAT: minified JSON as LAST LINE (no markdown, no extra spaces):
 {"tool_calls":[{"name":"<tool_name>","arguments":{}}]}
-DO NOT wrap in markdown fences. DO NOT use prose to simulate action.
 Available tools: ${toolNames}${skillRules}`;
 }
 
@@ -371,7 +371,7 @@ export function applyToolPrompt(systemMessage, tools, inAgentLoop = false) {
   return prompt ? `${systemMessage || ""}${prompt}`.trim() : systemMessage;
 }
 
-/** Light tool prompt for agent-loop: model has tool results, should synthesize or continue */
+/** Agent-loop prompt: model has tool results, must continue chain or finish cleanly */
 export function toolsToLightPrompt(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return "";
 
@@ -380,17 +380,19 @@ export function toolsToLightPrompt(tools) {
     .filter(Boolean)
     .join(", ");
 
-  // Same STRICT format as toolsToPrompt — consistency prevents Qwen confusion between modes.
-  // Light mode only differs in priority: prefer text answer when results already exist,
-  // but still force tool call for further actions (more reads, commands, verification).
+  // CRITICAL: When the model received a tool result that contains an error message,
+  // it tends to echo that error as its own response text instead of calling another tool.
+  // We MUST explicitly forbid this pattern and force JSON tool_calls format continuation.
   return `
 === TOOL USAGE RULES ===
-You received results from prior tool calls. Continue work or finish:
-- Need MORE data/action → CALL a tool NOW
-- All data collected, can answer/synthesize → WRITE plain text response
+You are in AGENT LOOP with tools. Your task is to EXECUTE actions, not explain them:
+- Received error from a tool? ANALYZE the error → CALL another tool OR give final answer
+- NEVER output "Терминал недоступен" or similar errors as your own message — those are TOOL results, call next step
+- User wants to READ/CREATE files → CALL matching file tool NOW
+- User wants RUN commands → CALL terminal/process NOW
+- Task COMPLETE → Write plain text answer with findings
 
-FORMAT for tool call (minified JSON, LAST LINE):
+FORMAT: minified JSON on LAST LINE (no markdown):
 {"tool_calls":[{"name":"<tool_name>","arguments":{}}]}
-DO NOT wrap in markdown fences.
 Available tools: ${toolNames}`;
 }
