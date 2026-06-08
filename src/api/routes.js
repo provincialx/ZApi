@@ -449,16 +449,13 @@ router.post("/chat/completions", async (req, res) => {
               effectiveParentId,
             );
 
-            // Auto-reset: инкремент toolCallCount после успешного вызова инструмента.
+            // Auto-reset: инкремент toolCallCount, но НЕ сбрасываем СРЕДИ agent loop.
+            // Qwen теряет контекст предыдущего assistant.tool_calls в свежем чате →
+            // пишет объяснительный текст вместо continuation.
             const defChat = getModelDefaultChats().get(mappedModel);
             if (defChat && !explicitChatId) {
               defChat.toolCallCount = (defChat.toolCallCount || 0) + 1;
-              if (defChat.toolCallCount >= TOOL_CALL_RESET_THRESHOLD) {
-                logInfo(
-                  `♻️ Auto-reset: достигнут лимит ${TOOL_CALL_RESET_THRESHOLD} tool calls. Инвалидация чата для ${mappedModel}`,
-                );
-                invalidateModelDefaultChat(mappedModel);
-              }
+              defChat.inAgentLoop = true; // mark loop active — defer reset
             }
             return;
           }
@@ -474,6 +471,26 @@ router.post("/chat/completions", async (req, res) => {
           req,
           effectiveParentId,
         );
+
+        // Auto-reset: применяем ТОЛЬКО когда agent loop завершён (модель
+        // написала текст без tool_calls). Mid-loop invalidation ломает Qwen —
+        // свежий чат не имеет внутреннего контекста assistant.tool_calls и
+        // модель отвечает объяснительным текстом вместо continuation.
+        {
+          const dc = getModelDefaultChats().get(mappedModel);
+          if (dc && !explicitChatId) {
+            if (
+              dc.inAgentLoop &&
+              dc.toolCallCount >= TOOL_CALL_RESET_THRESHOLD
+            ) {
+              logInfo(
+                `♻️ Agent loop ended. Auto-reset: достигнут лимит ${TOOL_CALL_RESET_THRESHOLD} tool calls для ${mappedModel}`,
+              );
+              invalidateModelDefaultChat(mappedModel);
+            }
+            dc.inAgentLoop = false;
+          }
+        }
 
         // Warn: модель получила инструменты но не использовала
         if (
@@ -589,6 +606,17 @@ router.post("/chat/completions", async (req, res) => {
       const parts = parseToolCallParts(result?.choices?.[0]?.message?.content);
       const rawCalls = parts.calls || [];
       const toolCalls = normalizeToolCalls(rawCalls);
+
+      // Auto-reset: increment on tool_calls, defer until loop ends.
+      // Same logic as streaming path — mid-loop invalidation breaks Qwen context.
+      {
+        const ndc = getModelDefaultChats().get(mappedModel);
+        if (ndc && !explicitChatId) {
+          ndc.toolCallCount = (ndc.toolCallCount || 0) + 1;
+          ndc.inAgentLoop = true;
+        }
+      }
+
       if (toolCalls && toolCalls.length > 0) {
         return res.json(
           buildOpenAIToolResponse(
@@ -598,6 +626,23 @@ router.post("/chat/completions", async (req, res) => {
             parts.visible,
           ),
         );
+      }
+
+      // Auto-reset: apply deferred reset when loop naturally ends (text response)
+      {
+        const nrdc = getModelDefaultChats().get(mappedModel);
+        if (nrdc && !explicitChatId) {
+          if (
+            nrdc.inAgentLoop &&
+            nrdc.toolCallCount >= TOOL_CALL_RESET_THRESHOLD
+          ) {
+            logInfo(
+              `♻️ Agent loop ended. Non-stream auto-reset: достигнут лимит ${TOOL_CALL_RESET_THRESHOLD} tool calls для ${mappedModel}`,
+            );
+            invalidateModelDefaultChat(mappedModel);
+          }
+          nrdc.inAgentLoop = false;
+        }
       }
 
       const openaiResponse = {

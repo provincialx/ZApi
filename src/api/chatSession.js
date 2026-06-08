@@ -499,7 +499,19 @@ export function persistSessionState(
     // This prevents next request from resolveQwenChatId returning dead chat ID
     // before persistSessionState had a chance to update the default.
     if (result.newChatId && existing?.chatId !== resolvedChatId) {
-      invalidateModelDefaultChat(mappedModel);
+      // Don't invalidate mid-agent-loop — Qwen loses context of prior
+      // assistant.tool_calls in fresh chat and writes explanatory text
+      // instead of continuing. Only reset when loop naturally ends.
+      const inLoop =
+        existing?.inAgentLoop ||
+        (result.choices?.[0]?.message?.content || "").includes("tool_calls");
+      if (inLoop) {
+        logInfo(
+          `♻️ Retry-newChatId during active loop — skipping invalidation for ${mappedModel}`,
+        );
+      } else {
+        invalidateModelDefaultChat(mappedModel);
+      }
     }
     saveModelDefaultChat(
       mappedModel,
