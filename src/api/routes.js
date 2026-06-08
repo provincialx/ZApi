@@ -49,7 +49,7 @@ import {
 } from "./openaiUtils.js";
 
 // ─── Project Context (anti-hallucination) ───────────────────────────────────
-import { buildAuditContext } from "./projectContext.js";
+import { buildProjectContext } from "./projectContext.js";
 
 // ─── Response Builders (streaming, tool calls SSE) ─────────────────────────
 import {
@@ -255,14 +255,12 @@ router.post("/chat/completions", async (req, res) => {
       ? systemMessage
       : applyToolPrompt(systemMessage, combinedTools, inAgentLoop);
 
-    // Inject актуальное состояние проекта при запросах аудита.
-    // Предотвращает галлюцинации из training data — модель видит реальную структуру.
-    const auditContext = buildAuditContext(messages);
-    if (auditContext) {
-      finalSystemMessage = `${finalSystemMessage || ""}
-
-${auditContext}`.trim();
-      logInfo(`📂 Audit request detected — injected real project context`);
+    // Anti-hallucination: always inject real project file tree into context.
+    // Prevents model from answering about files that exist in training data but not on disk.
+    const projectContext = buildProjectContext();
+    if (projectContext) {
+      finalSystemMessage =
+        `${finalSystemMessage || ""}\n\n${projectContext}`.trim();
     }
 
     // Сворачиваем историю, чтобы не превращать консоль в "потрошное месиво" при agent-loop (tool_calls)

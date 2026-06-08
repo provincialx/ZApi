@@ -30,23 +30,6 @@ const WHITELISTED_DOTFILES = new Set([
   ".rules",
 ]);
 
-// Ключевые слова, указывающие на запрос аудита/анализа структуры проекта
-const AUDIT_KEYWORDS = [
-  // Русские
-  /аудит(?:.*проект|.*код|.*структур)?/i,
-  /проверь.*(структур|файл|проект|что есть)/i,
-  /посмотри.*(файл|директор|структуру|проект)/i,
-  /какие.*файл/i,
-  /анализ(ир)?\s*(код|проект|структур)/i,
-  // Общие
-  /техдолг|techdebt|technical\s*debt/i,
-  /what\s+(files?)?\s+are.*in.*(project|codebase)/i,
-  /structure\s+(of)?\s*(this\s*)?(project|codebase)?/i,
-  // Контекстные — "покажи что у меня" (без training data)
-  /(?:(?:look over|scan|review|walk through)\s+(the )?)?(codebase|directory|folder structure)/i,
-  /(?:list|show me|tell me).*files?/i,
-];
-
 /**
  * Рекурсивно сканирует директорию и возвращает tree-like string.
  */
@@ -109,28 +92,19 @@ function scanDirectory(dir, prefix = "", isLast = true, depth = 0) {
 /**
  * Проверка содержит ли текст ключевые слова аудита.
  */
-export function isAuditRequest(messages) {
-  const texts = [];
+// Cache: scan once per process lifetime (project structure changes rarely)
+let _cachedStructure = null;
+const CACHE_TTL = 30_000; // 30s
+let _cacheTime = 0;
 
-  if (!messages || !Array.isArray(messages)) return false;
-
-  for (const msg of messages) {
-    if (!msg) continue;
-
-    if (typeof msg.content === "string") {
-      texts.push(msg.content);
-    } else if (Array.isArray(msg.content)) {
-      for (const part of msg.content) {
-        if (part.type === "text" && typeof part.text === "string") {
-          texts.push(part.text);
-        }
-      }
-    }
-  }
-
-  const combinedText = texts.join("\n");
-
-  return AUDIT_KEYWORDS.some((regex) => regex.test(combinedText));
+function getProjectStructureCached() {
+  const now = Date.now();
+  if (_cachedStructure && now - _cacheTime < CACHE_TTL) return _cachedStructure;
+  const tree = scanDirectory(PROJECT_ROOT);
+  const count = (tree.match(/├──|└──/g) || []).length;
+  _cachedStructure = `---PROJECT STRUCTURE (${count} items, real-time scan at ${new Date().toISOString()})---\n${tree}`;
+  _cacheTime = now;
+  return _cachedStructure;
 }
 
 /**
@@ -144,25 +118,19 @@ export function getProjectStructure() {
 }
 
 /**
- * Генерирует system instruction для предотвращения галлюцинаций.
- * Возвращает null если запрос не содержит audit-ключевых слов.
+ * Всегда инжектирует актуальное состояние проекта в system message.
+ * Anti-hallucination: модель не может угадать структуру из training data,
+ * потому что видит реальный снимок файловой системы.
  */
-export function buildAuditContext(messages) {
-  if (!isAuditRequest(messages)) return null;
+export function buildProjectContext() {
+  const structure = getProjectStructureCached();
 
-  const structure = getProjectStructure();
-
-  const contextBlock = `---CRITICAL INSTRUCTION---
-The user is asking about THIS project's structure. Below is the REAL, current file system state.
-DO NOT rely on training data or memory of what this project "usually" looks like.
-Use ONLY the structure below to answer questions about files, folders, and tech debt.
+  return `---PROJECT CONTEXT (REAL FILE SYSTEM STATE)---
+The user is working with THIS project. Below is the ACTUAL, current file system state.
+DO NOT answer from training data about what this project "used to have" or "should have".
+Only reference files and directories that appear in the structure below.
+If a file is not listed, it does not exist in this project.
 
 ${structure}
----END PROJECT STRUCTURE---`;
-
-  logDebug(
-    `[PROJECT CONTEXT] Audit keywords detected. Injecting real project state.`,
-  );
-
-  return contextBlock;
+---END PROJECT CONTEXT---`;
 }
