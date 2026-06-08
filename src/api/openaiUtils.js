@@ -105,9 +105,7 @@ export function isToolFailure(content) {
   const patterns = [
     /does not exist/i,
     /not found/i,
-    /unavailable/i,
-    /not supported/i,
-    /is not available/i,
+    /is not available/i, // Keep specific - matches OpenAI style
     /unknown tool/i,
     /invalid tool/i,
     /no such tool/i,
