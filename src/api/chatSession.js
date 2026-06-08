@@ -495,6 +495,12 @@ export function persistSessionState(
   // Update model default chat — next request without chatId reuses it
   const existing = getOrCreateModelDefaultChat(mappedModel);
   if ((existing && existing.chatId === resolvedChatId) || result.newChatId) {
+    // If retry created a new chat, invalidate old stale caches first.
+    // This prevents next request from resolveQwenChatId returning dead chat ID
+    // before persistSessionState had a chance to update the default.
+    if (result.newChatId && existing?.chatId !== resolvedChatId) {
+      invalidateModelDefaultChat(mappedModel);
+    }
     saveModelDefaultChat(
       mappedModel,
       resolvedChatId,

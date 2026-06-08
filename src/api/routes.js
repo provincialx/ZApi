@@ -396,6 +396,17 @@ router.post("/chat/completions", async (req, res) => {
               toolCalls,
               parts.visible,
             );
+
+            // Invalidate stale chat caches after retry-created chats.
+            // captureToolCalls path returns early here, skipping persistSessionState.
+            // Without this, next agent-loop request still gets old dead chatId from modelDefaultChats.
+            if (result.newChatId) {
+              invalidateModelDefaultChat(mappedModel);
+              logInfo(
+                `♻️ Инвалидация кэша после создания нового чата: ${result.newChatId}`,
+              );
+            }
+
             // Auto-reset: инкремент после успешного вызова инструмента.
             const defChat = getModelDefaultChats().get(mappedModel);
             if (defChat && !explicitChatId) {
