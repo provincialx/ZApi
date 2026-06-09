@@ -1,7 +1,15 @@
 import { getBrowserContext } from "./browser.js";
 import { saveAuthToken } from "./session.js";
-import { logWarn, logDebug } from "../logger/index.js";
-import { CHAT_PAGE_URL, PAGE_TIMEOUT, RETRY_DELAY, PAGE_POOL_SIZE } from "../config.js";
+import { logWarn, logDebug, logInfo } from "../logger/index.js";
+import {
+  CHAT_PAGE_URL,
+  PAGE_TIMEOUT,
+  RETRY_DELAY,
+  PAGE_POOL_SIZE,
+  MAX_ACTIVE_PAGES,
+  PAGE_IDLE_TTL_MS,
+  PAGE_GC_INTERVAL_MS,
+} from "../config.js";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -78,20 +86,37 @@ export async function evaluateWithTimeout(
 /**
  * Manages a pool of Chromium pages. Health-checks on checkout via evaluateWithTimeout.
  * Reuses pages to avoid expensive browser tab creation/teardown overhead.
+ *
+ * Memory leak mitigation:
+ * - Hard limit on total active pages (MAX_ACTIVE_PAGES) prevents unbounded growth.
+ * - Periodic GC closes idle pages older than PAGE_IDLE_TTL_MS.
+ * - Each pooled page tracks lastUsed timestamp for TTL-based eviction.
  */
 const pagePool = {
-  pages: [],
+  pages: [], // { page, lastUsed } entries
   maxSize: PAGE_POOL_SIZE,
+  activeCount: 0, // pages currently checked out (not in pool)
+  _gcTimer: null,
 
   /**
    * Acquires a working page from the pool or creates a new one.
    * Health-checks pooled pages; drops dead ones and creates fresh tabs on failure.
    * Retry goto up to 3 times with exponential backoff on network errors.
+   * Blocks if MAX_ACTIVE_PAGES reached until a page is returned.
    */
   async getPage(context) {
+    // Enforce hard limit on active pages
+    while (this.activeCount >= MAX_ACTIVE_PAGES) {
+      logWarn(
+        `🔒 Active page limit reached (${MAX_ACTIVE_PAGES}), waiting for page release...`,
+      );
+      await delay(500);
+    }
+
     const baseContext = getBrowserContext();
     while (this.pages.length > 0) {
-      const page = this.pages.pop();
+      const entry = this.pages.pop();
+      const page = entry.page;
       try {
         if (page === baseContext) {
           logWarn("Базовая страница не должна быть в пуле, пропускаем");
@@ -104,6 +129,7 @@ const pagePool = {
         // Limit health-check timeout: if CDP connection degraded,
         // page dies quickly instead of hanging forever.
         await evaluateWithTimeout(page, () => document.readyState);
+        this.activeCount++;
         return page;
       } catch (e) {
         logWarn(
@@ -145,6 +171,7 @@ const pagePool = {
           }
         }
 
+        this.activeCount++;
         return newPage;
       } catch (e) {
         lastError = e;
@@ -161,8 +188,11 @@ const pagePool = {
 
   /**
    * Returns a page to the pool for reuse. Skips closed pages and base context.
+   * Tracks lastUsed timestamp for TTL-based GC.
    */
   releasePage(page) {
+    this.activeCount = Math.max(0, this.activeCount - 1);
+
     try {
       if (page.isClosed()) return;
     } catch {
@@ -176,9 +206,11 @@ const pagePool = {
     }
 
     if (this.pages.length < this.maxSize) {
-      this.pages.push(page);
+      this.pages.push({ page, lastUsed: Date.now() });
     } else {
-      import("../logger/index.js").then(({ logError }) => page.close().catch(logError));
+      import("../logger/index.js").then(({ logError }) =>
+        page.close().catch(logError),
+      );
     }
   },
 
@@ -187,15 +219,72 @@ const pagePool = {
    */
   async clear() {
     const baseContext = getBrowserContext();
-    for (const page of this.pages) {
-      if (page === baseContext) continue;
+    for (const entry of this.pages) {
+      if (entry.page === baseContext) continue;
       try {
-        await page.close();
+        await entry.page.close();
       } catch {
         /* ignore close errors during cleanup */
       }
     }
     this.pages = [];
+    this.activeCount = 0;
+  },
+
+  /**
+   * Periodic GC: closes pooled pages idle longer than PAGE_IDLE_TTL_MS.
+   * Runs every PAGE_GC_INTERVAL_MS. Started lazily on first getPage/releasePage.
+   */
+  _runGC() {
+    const now = Date.now();
+    const baseContext = getBrowserContext();
+    const before = this.pages.length;
+    const kept = [];
+
+    for (const entry of this.pages) {
+      const idle = now - entry.lastUsed;
+      if (idle > PAGE_IDLE_TTL_MS) {
+        if (entry.page !== baseContext) {
+          entry.page.close().catch(() => {});
+          logDebug(
+            `🗑 GC: closed idle page (idle ${Math.round(idle / 1000)}s)`,
+          );
+        }
+      } else {
+        kept.push(entry);
+      }
+    }
+
+    this.pages = kept;
+    const evicted = before - kept.length;
+    if (evicted > 0) {
+      logInfo(
+        `🗑 Page GC: evicted ${evicted} idle pages, ${kept.length} remaining in pool`,
+      );
+    }
+  },
+
+  /**
+   * Starts the periodic GC timer if not already running.
+   */
+  startGC() {
+    if (this._gcTimer) return;
+    this._gcTimer = setInterval(() => this._runGC(), PAGE_GC_INTERVAL_MS);
+    // Allow Node to exit even if timer is still running
+    if (this._gcTimer.unref) this._gcTimer.unref();
+    logDebug(
+      `🔄 Page GC started (interval ${PAGE_GC_INTERVAL_MS / 1000}s, TTL ${PAGE_IDLE_TTL_MS / 1000}s)`,
+    );
+  },
+
+  /**
+   * Stops the periodic GC timer. Called during shutdown.
+   */
+  stopGC() {
+    if (this._gcTimer) {
+      clearInterval(this._gcTimer);
+      this._gcTimer = null;
+    }
   },
 
   /**
@@ -205,9 +294,16 @@ const pagePool = {
     return {
       size: this.pages.length,
       maxSize: this.maxSize,
+      activeCount: this.activeCount,
+      maxActivePages: MAX_ACTIVE_PAGES,
+      idleTtlMs: PAGE_IDLE_TTL_MS,
+      gcIntervalMs: PAGE_GC_INTERVAL_MS,
     };
   },
 };
+
+// Auto-start GC on module load
+pagePool.startGC();
 
 export { pagePool };
 

@@ -35,6 +35,11 @@ export const STREAMING_CHUNK_DELAY =
 
 // ─── Лимиты ─────────────────────────────────────────────────────────────────
 export const PAGE_POOL_SIZE = Number(process.env.PAGE_POOL_SIZE) || 3;
+export const MAX_ACTIVE_PAGES = Number(process.env.MAX_ACTIVE_PAGES) || 5;
+export const PAGE_IDLE_TTL_MS =
+  Number(process.env.PAGE_IDLE_TTL_MS) || 5 * 60 * 1000; // 5 min
+export const PAGE_GC_INTERVAL_MS =
+  Number(process.env.PAGE_GC_INTERVAL_MS) || 60 * 1000; // 1 min
 export const MAX_FILE_SIZE =
   Number(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024; // 10 MB
 export const MAX_HISTORY_LENGTH = Number(process.env.MAX_HISTORY_LENGTH) || 100;
