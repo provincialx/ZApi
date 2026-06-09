@@ -76,7 +76,12 @@ export function toolsToPrompt(tools) {
 Когда нужен инструмент Zed, ты ДОЛЖЕН написать tool call прямо в своём ответе как СЛУЖЕБНЫЙ JSON.
 Этот JSON будет перехвачен прокси и НЕ будет показан пользователю в чате.
 Формат строго такой, без markdown, без \`\`\` и без пояснений вокруг:
-{"tool_calls":[{"name":"tool_name","arguments":{}}]}
+{"tool_calls":[{"name":"tool_name","arguments":{"key":"value"}}]}
+Все keys и values в arguments ДОЛЖНЫ быть строками с двойными кавычками ("str"), НЕ single quotes и NE unquoted.
+Примеры формата arguments:
+- terminal: {"command":"npm test","cd":"D:/Projects/MyProject","timeout_ms":30000}
+- edit_file: {"path":"src/main.js","edits":[{"old_text":"before()","new_text":"after()"}]}
+- write_file: {"path":"file.txt","content":"hello world"}
 НИКОГДА не пиши намерение вызвать инструмент как видимый текст.
 Либо ТОЛЬКО tool_calls JSON, либо ТОЛЬКО обычный текстовый ответ. Никогда оба вместе.
 Pосле результата tool/function НЕ повторяй тот же самый tool call с теми же arguments.
@@ -118,17 +123,86 @@ function _extractCallsFromParsed(parsed, allowSingle = false) {
   return calls;
 }
 
-function _normalizeArgs(rawArgs) {
-  // Re-parse then re-stringify to guarantee minified balanced JSON
-  if (typeof rawArgs === "string") {
+function _repairMalformedJson(text) {
+  // Qwen sometimes generates Python-style dicts or other non-JSON artifacts.
+  // Try multiple repair passes before giving up.
+  let fixed = text;
+
+  // Pass 1: quote unquoted string keys after { or , (must be valid identifier)
+  fixed = fixed.replace(/(\{|,)(\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1$2"$3":');
+
+  // Pass 2: replace Python None with JSON null
+  fixed = fixed.replace(/:\s*(?<!\\)None\b(?=[\s,}\]])/g, ": null");
+
+  // Pass 3: fix single-quoted strings to double-quoted
+  fixed = fixed.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
+
+  return fixed;
+}
+
+/**
+ * Repair tool call arguments using multiple strategies.
+ * Returns the repaired JSON string or original if all repairs fail.
+ */
+function _repairToolCallArgs(rawJson) {
+  // First attempt: standard repair
+  try {
+    const obj = JSON.parse(rawJson);
+    return { value: JSON.stringify(obj, null, 0), repaired: false };
+  } catch {}
+
+  const strategies = [
+    _repairMalformedJson,
+
+    // Strategy B: add missing closing braces for truncated output
+    (t) => {
+      let openBraces = 0,
+        openBrs = 0;
+      for (const c of t) {
+        if (c === "{") openBraces++;
+        else if (c === "}") openBraces--;
+        else if (c === "[") openBrs++;
+        else if (c === "]") openBrs--;
+      }
+      let repaired = t;
+      for (let i = 0; i < openBrs; i++) repaired += "]";
+      for (let i = 0; i < openBraces; i++) repaired += "}";
+      return repaired;
+    },
+
+    // Strategy C: repair then balance braces
+    (t) => {
+      let r = _repairMalformedJson(t);
+      let openBraces = 0,
+        openBrs = 0;
+      for (const c of r) {
+        if (c === "{") openBraces++;
+        else if (c === "}") openBraces--;
+        else if (c === "[") openBrs++;
+        else if (c === "]") openBrs--;
+      }
+      for (let i = 0; i < openBrs; i++) r += "]";
+      for (let i = 0; i < openBraces; i++) r += "}";
+      return r;
+    },
+  ];
+
+  for (const strategy of strategies) {
+    const repaired = strategy(rawJson);
     try {
-      const obj = JSON.parse(rawArgs);
-      return JSON.stringify(obj, null, 0);
-    } catch {
-      // Not valid JSON string — may already be {"key":"val"} with escaping issues.
-      // Return as-is; Zed will handle it.
-      return rawArgs;
-    }
+      const obj = JSON.parse(repaired);
+      console.log(`[TOOL_PARSE] Repaired malformed arguments (${repaired.substring(0, 80)}...)`);
+      return { value: JSON.stringify(obj, null, 0), repaired: true };
+    } catch {}
+  }
+
+  return { value: rawJson, repaired: false };
+}
+
+function _normalizeArgs(rawArgs) {
+  if (typeof rawArgs === "string") {
+    const result = _repairToolCallArgs(rawArgs);
+    return result.value;
   }
   if (typeof rawArgs === "object") {
     try {
