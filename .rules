@@ -1,108 +1,108 @@
 ## Tool Usage Policy
-- Всегда используй тулзы (list_directory, read_file, grep) для проверки состояния файлов и кода.
-- Никогда не отвечай о наличии/отсутствии файлов или содержимом кода по памяти — только через тулзы.
-- При аудите всегда начинай с list_directory и read_file.
-- Если пользователь спрашивает «есть ли файл X?» — вызови list_directory, а не отвечай из контекста.
+- Always use tools (list_directory, read_file, grep) to verify file and code state.
+- Never answer about file existence or code contents from memory — only via tools.
+- When auditing, always start with list_directory and read_file.
+- If user asks "does file X exist?" — call list_directory, do not answer from context.
 
 ## Documentation Sync
-- При любом изменении в core-логике (routes, qwenApi, toolUtils, browser, pagePool, config) — обновить соответствующий файл в `docs/`:
-  - Архитектура/потоки → `docs/02_ARCHITECTURE.md`
-  - Модули/интерфейсы → `docs/03_CODE_MAP.md`
-  - Статус/стабильность → `docs/01_STATUS.md`
-  - История изменений → `docs/05_CHANGELOG.md`
-  - Новые вопросы/debt → `docs/06_OPEN_QUESTIONS.md`
-- Коммитить документацию вместе с кодом в одном коммите.
+- On any core logic change (routes, qwenApi, toolUtils, browser, pagePool, config) — update the corresponding file in `docs/`:
+  - Architecture/flows → `docs/02_ARCHITECTURE.md`
+  - Modules/interfaces → `docs/03_CODE_MAP.md`
+  - Status/stability → `docs/01_STATUS.md`
+  - Change history → `docs/05_CHANGELOG.md`
+  - New questions/debt → `docs/06_OPEN_QUESTIONS.md`
+- Commit documentation together with code in a single commit.
 - Push to the repository after committing.
 
 # FreeQwenApi — Rules for AI Assistant
 
-> **Техническая документация** (архитектура, карта кода, статус, changelog) вынесена в `docs/`.  
-> В этом файле — **только правила поведения модели** при работе с кодом.
+> **Technical documentation** (architecture, code map, status, changelog) is maintained in `docs/`.  
+> This file contains **only model behavior rules** for working with code.
 
 ## 1. Project Context
-- **FreeQwenApi** = браузерный прокси ForgetMeAI. Node.js + Puppeteer.
-- Заменяет веб-аккаунт Qwen Chat на локальный OpenAI-compatible API (`localhost:3264`).
-- Целевой клиент — Zed Agent (Browser), но поддерживает любой OpenAI-compatible клиент.
-- **Терминальные обёртки (Aider и т.д.) исключены** — цель: полноценный agent с tool_calls через интерфейс Zed.
-- **Актуальные модели**: qwen3.7-max, qwen3.7-plus, qwen3.6-plus, qwen3.5-plus/flash, qwen3-max, qwen3-coder-plus.
+- **FreeQwenApi** = ForgetMeAI browser proxy. Node.js + Puppeteer.
+- Replaces Qwen Chat web account with a local OpenAI-compatible API (`localhost:3264`).
+- Target client — Zed Agent (Browser), but supports any OpenAI-compatible client.
+- **Terminal wrappers (Aider, etc.) are excluded** — goal: full agent with tool_calls via Zed interface.
+- **Current models**: qwen3.7-max, qwen3.7-plus, qwen3.6-plus, qwen3.5-plus/flash, qwen3-max, qwen3-coder-plus.
 
 ## 2. Critical Code Rules
 
-### 2.1 Tool Calls (Самое важное)
-- **Qwen Chat web API не принимает OpenAI `tools[]`**. Никогда не передавать нативный `tools` в `sendMessage()`.
-- **Единственный правильный путь**: инжектировать инструменты в System Message через `applyToolPrompt()` из `src/api/toolUtils.js`.
-- **Парсинг ответа**: ответ Qwen приходит как JSON-текст. Парсить через `parseToolCallJson()` из `toolUtils.js` обратно в OpenAI `message.tool_calls`.
-- **Не дублировать** логику tool prompt / parse между файлами — вся логика централизована в `toolUtils.js`.
-- При streaming с tool calls: `captureToolCalls = true` отключает обычный streaming callback, ответ собирается целиком для парсинга.
-- В agent-loop (когда есть tool results) использовать `toolsToLightPrompt()` вместо полного `toolsToPrompt()`.
+### 2.1 Tool Calls (Most Important)
+- **Qwen Chat web API does not accept OpenAI `tools[]`**. Never pass native `tools` to `sendMessage()`.
+- **Only correct path**: inject tools into System Message via `applyToolPrompt()` from `src/api/toolUtils.js`.
+- **Response parsing**: Qwen response arrives as JSON text. Parse via `parseToolCallJson()` from `toolUtils.js` back into OpenAI `message.tool_calls`.
+- **Do not duplicate** tool prompt / parse logic across files — all logic centralized in `toolUtils.js`.
+- When streaming with tool calls: `captureToolCalls = true` disables normal streaming callback, response collected entirely for parsing.
+- In agent-loop (when tool results present): use `toolsToLightPrompt()` instead of full `toolsToPrompt()`.
 
 ### 2.2 Sliding Window & History
-- При `messages.length > 60` — срез до System Prompt + последние 40 сообщений.
-- **Обязательное условие**: если после `.slice(-40)` первое сообщение имеет `role: "tool"`, **добавить предшествующий `assistant` с `tool_calls`** в начало среза. Иначе Qwen теряет контекст вызова и ломается agent-loop.
-- Логирование истории: использовать сводку с подсчётом ролей: `273 сообщений (1x system, 85x user, 86x assistant, 101x tool)`.
+- When `messages.length > 60` — slice to System Prompt + last 40 messages.
+- **Mandatory condition**: if after `.slice(-40)` the first message has `role: "tool"`, **prepend the preceding `assistant` with `tool_calls`** to the beginning of the slice. Otherwise Qwen loses call context and breaks agent-loop.
+- History logging: use summary with role counts: `273 messages (1x system, 85x user, 86x assistant, 101x tool)`.
 
 ### 2.3 Chat ID Resolution (Layered Fallback)
-Порядок разрешения `effectiveChatId` → `qwenChatId` (функция `resolveQwenChatId`):
-1. `chatIdMap` (глобальный маппинг generated→qwen)
-2. `modelDefaultChats` (один чат на модель для агентов без conversation_id)
-3. Создание нового чата через `createChatV2()` + сохранение в маппинг и default
-- **Функция `resolveQwenChatId` всегда должна возвращать `qwenChatId`**.
-- При `forceNewChat` — генерировать новый `chat_` ID, сбрасывать `parentId`.
-- При ошибке `"chat_not_exist"` от Qwen: инвалидировать `modelDefaultChats` и `chatIdMap`, создать свежий чат, повторить запрос **ровно один раз** (`retryCount === 0`).
+Resolution order for `effectiveChatId` → `qwenChatId` (function `resolveQwenChatId`):
+1. `chatIdMap` (global mapping generated→qwen)
+2. `modelDefaultChats` (one chat per model for agents without conversation_id)
+3. Create new chat via `createChatV2()` + save to mapping and default
+- **Function `resolveQwenChatId` must always return `qwenChatId`**.
+- On `forceNewChat` — generate new `chat_` ID, reset `parentId`.
+- On `"chat_not_exist"` error from Qwen: invalidate `modelDefaultChats` and `chatIdMap`, create fresh chat, retry request **exactly once** (`retryCount === 0`).
 
 ### 2.4 Session Management
-- **Scoped sessions**: по `conversation_id`/`chat_id` (из хедеров или body). Ключ: `sha256(ip||ua)::conversation:${hint}`.
-- **Unscoped fallback**: по IP+UA только если `ALLOW_UNSCOPED_SESSION_CHAT_RESTORE=true`.
-- **Meta-запросы OpenWebUI** (`### Task:`, `History:`) — всегда `effectiveChatId = null`, `effectiveParentId = null`, чтобы не засорять основной чат.
-- `isOpenWebUiMetaRequest()` — фильтрует фоновые промпты OpenWebUI.
+- **Scoped sessions**: by `conversation_id`/`chat_id` (from headers or body). Key: `sha256(ip||ua)::conversation:${hint}`.
+- **Unscoped fallback**: by IP+UA only if `ALLOW_UNSCOPED_SESSION_CHAT_RESTORE=true`.
+- **OpenWebUI meta-requests** (`### Task:`, `History:`) — always `effectiveChatId = null`, `effectiveParentId = null` to avoid polluting main chat.
+- `isOpenWebUiMetaRequest()` — filters OpenWebUI background prompts.
 
 ### 2.5 Error Handling
-- `handleApiError()` в `chat.js` **всегда возвращает строку** (`HTTP 500`, `Неизвестная ошибка` и т.д.). Никогда `{ error: undefined }`.
-- Логирование тела ответа API — уровень `WARN` (не DEBUG).
-- `isChatNotExistError()` — проверяет `/not exist/i` в `result.details`.
+- `handleApiError()` in `chat.js` **always returns a string** (`HTTP 500`, `Unknown error`, etc.). Never `{ error: undefined }`.
+- API response body logging — level `WARN` (not DEBUG).
+- `isChatNotExistError()` — checks `/not exist/i` in `result.details`.
 
 ### 2.6 Message Folding (OpenAI Compatibility)
-- Если `hasOpenAIToolState(messages)` или `!effectiveChatId && nonSystemMessages.length > 1` — сворачивать всю историю в одно user-сообщение через `buildStatelessTranscript()`.
-- Qwen Chat не имеет роли `tool`, поэтому tool results передаются только через folded transcript или prompt injection.
+- If `hasOpenAIToolState(messages)` or `!effectiveChatId && nonSystemMessages.length > 1` — fold entire history into single user message via `buildStatelessTranscript()`.
+- Qwen Chat has no `tool` role, so tool results are passed only via folded transcript or prompt injection.
 
 ### 2.7 Streaming
 - SSE headers: `text/event-stream`, `X-Accel-Buffering: no`, `Transfer-Encoding: chunked`.
-- Qwen может вернуть JSON вместо SSE — в этом случае отправить контент одним чанком.
-- Chunk size: 16 code points (не байт — Unicode safety).
-- `STREAMING_CHUNK_DELAY` между чанками.
+- Qwen may return JSON instead of SSE — in this case send content as single chunk.
+- Chunk size: 16 code points (not bytes — Unicode safety).
+- `STREAMING_CHUNK_DELAY` between chunks.
 
 ## 3. Logging Standards
-- Использовать `logInfo()`, `logError()`, `logWarn()`, `logDebug()` из `src/logger/index.js`.
-- **Исключения для `console.log`**: допустимы ТОЛЬКО в:
-  - `src/browser/browser.js` (строки 207-217) — интерактивный CLI-вывод для ручной авторизации.
-  - `src/api/toolUtils.js` (строка 108) — debug-trace парсинга tool calls (`[TOOL_PARSE]`).
-  - `index.js` / `scripts/` — startup-сообщения и CLI-скрипты.
-- В остальном production-коде (`routes.js`, `chat.js`, `tokenManager.js`) — **только логгер**.
-- Формат логов: эмодзи-префикс для быстрой идентификации (`🔁`, `♻️`, `🔨`, `🗑`).
+- Use `logInfo()`, `logError()`, `logWarn()`, `logDebug()` from `src/logger/index.js`.
+- **Exceptions for `console.log`**: allowed ONLY in:
+  - `src/browser/browser.js` (lines 207-217) — interactive CLI output for manual auth.
+  - `src/api/toolUtils.js` (line 108) — debug-trace for tool call parsing (`[TOOL_PARSE]`).
+  - `index.js` / `scripts/` — startup messages and CLI scripts.
+- In all other production code (`routes.js`, `chat.js`, `tokenManager.js`) — **logger only**.
+- Log format: emoji prefix for quick identification (`🔁`, `♻️`, `🔨`, `🗑`).
 
 ## 4. Testing Checklist (Smoke Test)
-При любом изменении в core-логике проверить:
-1. **Sliding window** (65+ msg) → корректный ответ, tool_call пары сохранены.
-2. **Tool call roundtrip** → agent-loop path работает (prompt injection → JSON ответ → parseToolCallJson).
-3. **Streaming endpoint** → `text/event-stream`, первый чанк получен, финальный `[DONE]`.
-4. **Chat not exist retry** → при удалении чата на стороне Qwen прокси создаёт новый и продолжает.
-5. **Meta-request isolation** → OpenWebUI background prompts не ломают основную сессию.
+On any core logic change, verify:
+1. **Sliding window** (65+ msg) → correct response, tool_call pairs preserved.
+2. **Tool call roundtrip** → agent-loop path works (prompt injection → JSON response → parseToolCallJson).
+3. **Streaming endpoint** → `text/event-stream`, first chunk received, final `[DONE]`.
+4. **Chat not exist retry** → when chat deleted on Qwen side, proxy creates new one and continues.
+5. **Meta-request isolation** → OpenWebUI background prompts do not break main session.
 
 ## 5. Tech Debt & Known Issues (Do Not Introduce New Debt)
-- Не добавлять новые unused imports.
-- Node-streaming использует глобальный `fetch`. На старых Node может отсутствовать. Явная проверка `typeof fetch` предпочтительнее.
-- Память браузера растёт при длительном agent-loop (>100 вызовов). PAGE_POOL_SIZE=3 помогает, но старые страницы не GC-нуты пока в массиве.
-- `testToken` импортирован в `routes.js` — используется только в `/status`. Не размножать token-test логику вне `tokenManager.js`.
-- `Target.closeTarget: Target closed` в error.log — известная ошибка при закрытии страниц в пуле. Не критично, но указывает на необходимость health-check.
+- Do not add new unused imports.
+- Node-streaming uses global `fetch`. May be missing on older Node versions. Explicit `typeof fetch` check preferred.
+- Browser memory grows during long agent-loops (>100 calls). PAGE_POOL_SIZE=3 helps but old pages not GC'd while in array.
+- `testToken` imported in `routes.js` — used only in `/status`. Do not replicate token-test logic outside `tokenManager.js`.
+- `Target.closeTarget: Target closed` in error.log — known error when closing pool pages. Not critical but indicates need for health-check.
 
 ## 6. Prohibited Patterns
-- ❌ Передавать `tools[]` в нативном OpenAI формате в `sendMessage()` — Qwen web API их не понимает.
-- ❌ Дублировать логику `applyToolPrompt` / `parseToolCallJson` вне `toolUtils.js`.
-- ❌ Использовать `page.evaluate()` без таймаута — всегда через `evaluateWithTimeout()`.
-- ❌ Возвращать `undefined` из `handleApiError()` или `resolveQwenChatId()`.
-- ❌ Рвать tool_call/tool_result пары в sliding window.
-- ❌ Использовать `console.log` вместо логгера (кроме исключений в §3).
-- ❌ Делать `goto()` без retry-loop при сетевых операциях.
+- ❌ Pass `tools[]` in native OpenAI format to `sendMessage()` — Qwen web API does not understand them.
+- ❌ Duplicate `applyToolPrompt` / `parseToolCallJson` logic outside `toolUtils.js`.
+- ❌ Use `page.evaluate()` without timeout — always via `evaluateWithTimeout()`.
+- ❌ Return `undefined` from `handleApiError()` or `resolveQwenChatId()`.
+- ❌ Break tool_call/tool_result pairs in sliding window.
+- ❌ Use `console.log` instead of logger (except exceptions in §3).
+- ❌ Call `goto()` without retry-loop for network operations.
 
 ## 7. Caveman Mode
 Rules:
