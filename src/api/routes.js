@@ -482,6 +482,9 @@ router.post("/chat/completions", async (req, res) => {
           }
 
           if (toolCalls && toolCalls.length > 0) {
+            logInfo(
+              `🔨 Writing ${toolCalls.length} tool calls via SSE (${Array.isArray(parts?.visible) ? "text" : "json"} format)`,
+            );
             writeToolCallsSse(
               res,
               mappedModel,
