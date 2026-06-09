@@ -44,6 +44,8 @@ import {
   areAllToolsFailed,
   hasOpenAIToolState,
   prepareOpenAIMessageInput,
+  getRepeatedToolCalls,
+  getBlockedToolCalls,
 } from "./openaiUtils.js";
 
 // ─── Project Context (anti-hallucination) ───────────────────────────────────
@@ -429,6 +431,56 @@ router.post("/chat/completions", async (req, res) => {
           parts = parseToolCallParts(result?.choices?.[0]?.message?.content);
           const rawCalls = parts.calls || [];
           const toolCalls = normalizeToolCalls(rawCalls);
+
+          // Anti-loop: detect repeated/blocked tool calls (from Python fork)
+          if (toolCalls && toolCalls.length > 0) {
+            const repeated = getRepeatedToolCalls(toolCalls, messages);
+            const blocked = getBlockedToolCalls(toolCalls, messages);
+
+            if (repeated.length > 0) {
+              logInfo(
+                `🔁 Anti-loop guard: ${repeated.join(", ")} уже выполнялись`,
+              );
+              const fallbackContent =
+                parts?.visible ||
+                "Останавливаю повторные вызовы инструментов. Модель получила результат — перейди к следующему шагу.";
+              writeSse({
+                id: "chatcmpl-stream",
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: mappedModel || "qwen-max-latest",
+                choices: [
+                  {
+                    index: 0,
+                    delta: { content: fallbackContent },
+                    finish_reason: null,
+                  },
+                ],
+              });
+              writeSse({
+                id: "chatcmpl-stream",
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: mappedModel || "qwen-max-latest",
+                choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+              });
+              res.write("data: [DONE]\n\n");
+              res.end();
+
+              persistSessionState(
+                result,
+                qwenChatId,
+                isMeta,
+                effectiveChatId,
+                conversationScope,
+                mappedModel,
+                req,
+                effectiveParentId,
+              );
+              return;
+            }
+          }
+
           if (toolCalls && toolCalls.length > 0) {
             writeToolCallsSse(
               res,

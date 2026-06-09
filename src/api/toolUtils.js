@@ -34,68 +34,48 @@ export function compactJsonSchema(schema, depth = 0) {
   return out;
 }
 
+/**
+ * Build Zed tool protocol prompt. Matches Python fork's tools_to_prompt().
+ * Sends FULL tool schemas so Qwen knows exact parameter format.
+ */
 export function toolsToPrompt(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return "";
 
-  const priorityNames = new Set([
-    "skill_view",
-    "skills_list",
-    "skill_manage",
-    "read_file",
-    "search_files",
-    "write_file",
-    "patch",
-    "terminal",
-    "process",
-    "web_search",
-    "web_extract",
-    "session_search",
-    "todo",
-    "clarify",
-    "delegate_task",
-  ]);
-
-  const schemas = tools
+  const compact = tools
     .map((tool) => {
       const fn = tool?.function || tool;
       if (!fn?.name) return null;
-      return {
-        name: fn.name,
-        description: truncateForPrompt(
-          fn.description || "",
-          priorityNames.has(fn.name) ? 300 : 150,
-        ),
-        parameters: compactJsonSchema(
-          fn.parameters || { type: "object", properties: {} },
-        ),
-        priority: priorityNames.has(fn.name) ? 0 : 1,
-      };
+      const item = { name: fn.name };
+      if (fn.description) item.description = fn.description.slice(0, 500);
+      if (fn.parameters && typeof fn.parameters === "object") {
+        item.parameters = fn.parameters;
+      }
+      return item;
     })
-    .filter(Boolean)
-    .sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
+    .filter(Boolean);
 
-  if (schemas.length === 0) return "";
+  if (compact.length === 0) return "";
 
-  const toolNames = schemas.map((s) => s.name).join(", ");
-
-  // Skill view specific injection only if present
-  const skillRules = schemas.some((s) => s.name === "skill_view")
-    ? `\nCRITICAL: If user asks about skills/config/setup, ALWAYS call skill_view first.`
+  const skillViewRule = compact.some((s) => s.name === "skill_view")
+    ? "\nCRITICAL: Если пользователь спрашивает про skills/config/setup, ВСЕГДА вызывай skill_view первым."
     : "";
 
-  return `
-=== TOOL USAGE RULES ===
-RULES:
-- NEVER explain tool errors in text output. If a tool returns an error, CALL another tool with corrected arguments or give final answer.
-- When user asks to READ/CREATE/MODIFY files → ALWAYS call matching tool
-- When user asks to RUN commands/search/deploy → ALWAYS call terminal/process/web_search
-- You have tool results but NEED MORE DATA → CALL next tool NOW
-- Only give plain text answer when task is COMPLETE and verified
-- If no action needs tools (greeting, explanation, summary) → write plain text WITHOUT any JSON
-
-When a tool call IS needed, add this minified JSON as LAST LINE (no markdown, no extra spaces):
-{"tool_calls":[{"name":"<tool_name>","arguments":{}}]}
-Available tools: ${toolNames}${skillRules}`;
+  return `ВАЖНО: инструменты выполняет только внешний клиент Zed, не Qwen Chat.
+Запрещено использовать встроенные инструменты сайта Qwen: web search, online search, research, code interpreter, browser, plugins.
+Когда нужен инструмент Zed, ты ДОЛЖЕН написать tool call прямо в своём ответе как СЛУЖЕБНЫЙ JSON.
+Этот JSON будет перехвачен прокси и НЕ будет показан пользователю в чате.
+Формат строго такой, без markdown, без \`\`\` и без пояснений вокруг:
+{"tool_calls":[{"name":"tool_name","arguments":{}}]}
+После результата tool/function НЕ повторяй тот же самый tool call с теми же arguments.
+Если tool уже вернул Status: Completed — считай результат полученным, даже если вывод пустой.
+Если list_directory уже был выполнен для того же path — НЕ вызывай его снова; используй уже полученный результат.
+Если файловый tool вернул ошибку про путь (например outside the project) — повтори вызов с исправленным путём в формате, который ожидает Zed (обычно с именем папки проекта в начале).
+Если результат достаточен — дай финальный обычный ответ пользователю.
+Повторяй tool call только если изменились arguments или реально нужен другой следующий шаг.
+Не выдумывай инструменты. Используй только имена из списка.
+Если инструмент не нужен, отвечай обычным текстом.
+Доступные Zed tools:
+${JSON.stringify(compact, null, 0)}${skillViewRule}`;
 }
 
 // ─── Raw JSON parser helpers (from Python fork) ──────────────────────────────
@@ -372,28 +352,38 @@ export function applyToolPrompt(systemMessage, tools, inAgentLoop = false) {
   return prompt ? `${systemMessage || ""}${prompt}`.trim() : systemMessage;
 }
 
-/** Agent-loop prompt: model has tool results, must continue chain or finish cleanly */
+/** Agent-loop prompt: model has tool results.
+ * Light version — don't coerce into more tool calls, but keep anti-loop guard.
+ * Matches Python fork's approach with full schemas + continuation rules. */
 export function toolsToLightPrompt(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return "";
 
-  const toolNames = tools
-    .map((t) => (t?.function ? t.function.name : t?.name))
-    .filter(Boolean)
-    .join(", ");
+  const compact = tools
+    .map((tool) => {
+      const fn = tool?.function || tool;
+      if (!fn?.name) return null;
+      const item = { name: fn.name };
+      if (fn.description) item.description = fn.description.slice(0, 500);
+      if (fn.parameters && typeof fn.parameters === "object") {
+        item.parameters = fn.parameters;
+      }
+      return item;
+    })
+    .filter(Boolean);
 
   // CRITICAL: When the model received a tool result that contains an error message,
   // it tends to echo that error as its own response text instead of calling another tool.
   // We MUST explicitly forbid this pattern and force JSON tool_calls format continuation.
-  return `
-=== TOOL USAGE RULES ===
+  return `=== TOOL USAGE RULES ===
 You are in AGENT LOOP with tools. Your task is to EXECUTE actions, not explain them:
-- Received error from a tool? ANALYZE the error → CALL another tool OR give final answer
+- Received error from a tool? ANALYZE the error → CALL another tool with CORRECTED arguments OR give final answer
 - NEVER output "Терминал недоступен" or similar errors as your own message — those are TOOL results, call next step
-- User wants to READ/CREATE files → CALL matching file tool NOW
-- User wants RUN commands → CALL terminal/process NOW
+- AFTER receiving a tool result, DO NOT repeat the SAME tool call with the SAME arguments
+- If Status: Completed — consider the result received even if output is empty
 - Task COMPLETE → Write plain text answer with findings WITHOUT any JSON
 
 When you NEED to call another tool, add this minified JSON on LAST LINE (no markdown):
 {"tool_calls":[{"name":"<tool_name>","arguments":{}}]}
-Available tools: ${toolNames}`;
+Available Zed tools:
+${JSON.stringify(compact, null, 0)}`;
 }

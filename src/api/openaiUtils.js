@@ -277,6 +277,124 @@ export function isToolFailure(content) {
   return patterns.some((p) => p.test(content));
 }
 
+// ─── Anti-loop Detection (from Python fork) ──────────────────────────────────
+
+/** Build a call signature: tool_name + serialized arguments */
+function _makeCallSig(name, args) {
+  if (!name) return null;
+  const normalized =
+    typeof args === "object" ? JSON.stringify(args) : String(args || "{}");
+  return `${name}:${normalized.substring(0, 200)}`;
+}
+
+/** Collect tool result signatures from the most recent assistant+tool turn. */
+function _currentToolResultSignatures(messages) {
+  const msgs = messages || [];
+  let lastAssistIdx = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (
+      msgs[i]?.role === "assistant" &&
+      (msgs[i].tool_calls?.length > 0 || msgs[i].function_call)
+    ) {
+      lastAssistIdx = i;
+      break;
+    }
+  }
+  if (lastAssistIdx < 0) return new Set();
+
+  const sigs = new Set();
+  // Get the assistant's tool_calls to match arguments
+  const assistMsg = msgs[lastAssistIdx];
+  const prevCallsByNameArgs = new Map();
+  if (assistMsg?.tool_calls) {
+    for (const tc of assistMsg.tool_calls) {
+      const fnName = tc?.function?.name ?? tc?.name;
+      const fnArgs = tc?.function?.arguments ?? tc?.arguments ?? "{}";
+      prevCallsByNameArgs.set(fnName, fnArgs);
+    }
+  }
+
+  for (let i = lastAssistIdx + 1; i < msgs.length; i++) {
+    if (msgs[i]?.role === "tool" || msgs[i]?.role === "function") {
+      const name = msgs[i].name;
+      // Use the stored arguments from the assistant's tool_calls for signature matching
+      const args = prevCallsByNameArgs.get(name) ?? "{}";
+      const sig = _makeCallSig(
+        name,
+        typeof args === "string" ? JSON.parse(args) : args,
+      );
+      if (sig) sigs.add(sig);
+    }
+  }
+  return sigs;
+}
+
+/**
+ * Check if any of the parsed tool_calls repeat a call that already has results.
+ * Returns list of duplicate signatures, empty if no repetition detected.
+ * Matches Python fork's repeated_current_tool_calls().
+ */
+export function getRepeatedToolCalls(calls, messages) {
+  const previousSigs = _currentToolResultSignatures(messages);
+  if (previousSigs.size === 0) return [];
+
+  const repeated = [];
+  for (const call of calls || []) {
+    const name = call?.function?.name ?? call?.name ?? null;
+    if (!name) continue;
+
+    let argsObj = {};
+    try {
+      const rawArgs = call?.function?.arguments ?? call?.arguments ?? "{}";
+      argsObj = typeof rawArgs === "string" ? JSON.parse(rawArgs) : rawArgs;
+    } catch {
+      argsObj = {};
+    }
+
+    const sig = _makeCallSig(name, argsObj);
+    if (sig && previousSigs.has(sig)) {
+      repeated.push(`${name}(...)`);
+    }
+  }
+  return repeated;
+}
+
+/**
+ * Check if model is blocked after failed tool calls — continues calling tools
+ * that already returned errors (e.g. "outside the project" on file operations).
+ */
+export function getBlockedToolCalls(calls, messages) {
+  const [, results] = collectCurrentToolTurn(messages);
+  if (!results || !results.length) return [];
+
+  const resultTexts = [];
+  for (const r of results) {
+    resultTexts.push(compactText(r.content || "", 1000));
+  }
+  const content = resultTexts.join("\n").toLowerCase();
+
+  // Only block on specific patterns
+  if (!content.includes("outside the project")) return [];
+
+  const fileTools = [
+    "create_directory",
+    "list_directory",
+    "read_file",
+    "write_file",
+    "patch",
+    "edit_file",
+    "delete_path",
+  ];
+  const blocked = [];
+  for (const call of calls || []) {
+    const name = call?.function?.name ?? call?.name ?? "";
+    if (fileTools.includes(name)) {
+      blocked.push(name);
+    }
+  }
+  return blocked;
+}
+
 export function areAllToolsFailed(messages) {
   const toolMessages = (messages || []).filter(
     (msg) => msg?.role === "tool" || msg?.role === "function",
