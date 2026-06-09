@@ -1,6 +1,6 @@
 import { getBrowserContext, isBrowserRestarting, restartBrowserIfLeaking } from "./browser.js";
 import { saveAuthToken } from "./session.js";
-import { logWarn, logDebug, logInfo } from "../logger/index.js";
+import { logWarn, logDebug, logInfo, logError } from "../logger/index.js";
 import {
   CHAT_PAGE_URL,
   PAGE_TIMEOUT,
