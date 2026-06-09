@@ -1,255 +1,142 @@
-# FreeQwenApi — ForgetMeAI fork
-
-> **Локальный OpenAI-compatible прокси к Qwen Chat**. Контакты: `mandrykinsergey@gmail.com` | [twitch.tv/dnovitv](https://www.twitch.tv/dnovitv)
-> Текст, модели Qwen 3.7, файлы, Open WebUI, генерация изображений и видео через Qwen Chat.
+# FreeQwenApi — локальный OpenAI-API через Qwen Chat
 
 ![Contact](https://img.shields.io/badge/Contact-mandrykinsergey@-blue)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-green)
 ![Qwen](https://img.shields.io/badge/Qwen-Chat-purple)
 
-## Что это такое
+> **Локальный прокси, превращает аккаунт Qwen Chat в стандартный OpenAI API.**  
+> Контакты: `mandrykinsergey@gmail.com` | [twitch.tv/dnovitv](https://www.twitch.tv/dnovitv)
 
-FreeQwenApi превращает веб-аккаунт Qwen Chat в локальный API endpoint:
+## Что это такое?
+
+FreeQwenApi — это мост между вашим локальным компьютером и веб-версией Qwen Chat. Проект запускает скрытый браузер, авторизуется в `chat.qwen.ai`, а затем отдаёт ответы модели по адресу `http://localhost:3264/api` в формате OpenAI.
+
+**Это не скачанная модель на вашу видеокарту** и **не официальный API от Alibaba**. Это удобный инструмент, который позволяет использовать любой OpenAI-совместимый софт (Open WebUI, LiteLLM, Zed Agent) с бесплатным/базовым аккаунтом Qwen.
 
 ```text
-http://localhost:3264/api
+Ваша программа  →  FreeQwenApi (localhost:3264)  →  Браузер в фоне (Puppeteer)  →  chat.qwen.ai
+         ↑_________________________________________________________↓___________________________↓
+                              Ответ от ИИ (OpenAI формат)
 ```
 
-Это **не локальная модель на вашей видеокарте** и **не официальный API Alibaba/Qwen**. Это практичный browser-based proxy: вы авторизуетесь в Qwen Chat, проект сохраняет сессию и даёт локальный OpenAI-compatible API для ваших инструментов.
+## Как начать работу
 
-## Возможности fork
+Требуется установленный [Node.js](https://nodejs.org/) (версия 18+).
 
-- **Chat Completions API**: `POST /api/chat/completions`, совместимый с OpenAI SDK, Open WebUI, LiteLLM и агентами.
-- **Актуальные модели Qwen Chat**: `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus` и другие модели из `src/AvailableModels.txt`.
-- **Мультиаккаунты**: добавление, перелогин, удаление, статусы `OK` / `WAIT` / `INVALID`, автоматическая round-robin ротация при лимитах.
-- **Загрузка файлов**: upload endpoint для файлов и вложений Qwen.
-- **Open WebUI**: можно подключить как OpenAI-compatible backend.
-- **Health/smoke tooling**: `/api/health`, `/api/status`, `/api/models`, `npm run smoke`, `npm run models:sync`.
-- **Contact info**: watermark с контактами в README, CLI и health metadata.
-
-## Быстрый старт
-
+### 1. Установка и первый запуск
 ```bash
 git clone https://github.com/ForgetMeAI/FreeQwenApi
 cd FreeQwenApi
 npm install
-npm run auth
-npm run models:sync
+```
+
+### 2. Добавление аккаунта Qwen
+Команда запустит браузер Chromium. Войдите в свой аккаунт на `chat.qwen.ai`, затем закройте окно браузера. Токены сохранятся автоматически в папке `session/`.
+```bash
+npm run auth -- --add
+```
+
+### 3. Синхронизация моделей и старт сервера
+```bash
+npm run models:sync         # скачает актуальный список доступных моделей (qwen3-coder-plus, qwen3-max...)
 SKIP_ACCOUNT_MENU=true npm start
 ```
 
-В другом терминале:
-
+### 4. Проверка работоспособности
+Сервер готов к запросам на порту `3264`. Запустите встроенную проверку:
 ```bash
 npm run smoke
 ```
 
-Если всё хорошо, API доступен здесь:
+## Как пользоваться API
 
-```text
-http://localhost:3264/api
-```
+Любой клиент, который умеет работать с OpenAI, подключается через базовый URL:  
+`http://localhost:3264/api` (API Key можно указать любой, например `dummy-key`).
 
-## Авторизация Qwen Chat
-
-Добавить аккаунт:
-
-```bash
-npm run auth
-```
-
-Или сразу конкретное действие:
-
-```bash
-npm run auth -- --add
-npm run auth -- --list
-npm run auth -- --relogin
-npm run auth -- --remove
-```
-
-При добавлении аккаунта откроется Chromium. Войдите в Qwen Chat, затем вернитесь в терминал — токен будет сохранён в `session/`.
-
-**Не коммитьте и не публикуйте секреты:**
-
-- `session/`
-- `session/tokens.json`
-- `session/accounts/**/token.txt`
-- `.env`
-- `Authorization.txt`
-- cookies / browser profile / реальные токены
-
-## Основные endpoints
-
-### Health
-
-```bash
-curl http://localhost:3264/api/health
-```
-
-Ответ содержит количество моделей, аккаунтов и watermark:
-
-```json
-{
-  "ok": true,
-  "service": "FreeQwenApi",
-  "watermark": "mandrykinsergey@gmail.com | twitch.tv/dnovitv",
-  "baseUrl": "/api",
-  "models": 28
-}
-```
-
-### Список моделей
-
-```bash
-curl http://localhost:3264/api/models
-```
-
-Обновить список моделей из Qwen Chat metadata:
-
-```bash
-npm run models:sync
-```
-
-Подробный отчёт: [docs/QWEN_CHAT_MODELS.md](docs/QWEN_CHAT_MODELS.md)
-
-### Chat Completions
-
+### Пример запроса (curl)
 ```bash
 curl http://localhost:3264/api/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen3.7-max",
-    "messages": [
-      {"role": "user", "content": "Ответь коротко: что такое FreeQwenApi?"}
-    ],
+    "messages": [{"role": "user", "content": "Что такое FreeQwenApi?"}],
     "stream": false
   }'
 ```
 
-OpenAI SDK:
-
-```js
+### Пример кода (JavaScript / TypeScript)
+```javascript
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
   baseURL: 'http://localhost:3264/api',
-  apiKey: 'dummy-key'
+  apiKey: 'dummy-key' // ключ любой, сервер не проверяет его строго
 });
 
 const response = await openai.chat.completions.create({
   model: 'qwen3.7-max',
-  messages: [{ role: 'user', content: 'Привет!' }]
+  messages: [{ role: 'user', content: 'Привет! Напиши коротко о проекте.' }]
 });
 
 console.log(response.choices[0].message.content);
 ```
 
-## Open WebUI
+### Подключение Open WebUI
+1. Скачайте и запустите локальный [Open WebUI](https://github.com/open-webui/open-webui).
+2. Перейдите в настройки провайдера (Providers → OpenAI API Compatible).
+3. Введите:
+   - **Base URL**: `http://localhost:3264/api` (если Open WebUI стоит в Docker — `http://host.docker.internal:3264/api`)
+   - **API Key**: `dummy-key`
+   - **Model**: выберите из списка (например, `qwen3.7-max`)
 
-Для локального Open WebUI:
+## Работа с инструментами (Tool Calling)
 
-```text
-Base URL: http://localhost:3264/api
-API Key: dummy-key
-Model: qwen3.7-max
-```
+Проект умеет работать со сложными AI-агентами, которые требуют вызова внешних инструментов (`tool_calls`), таких как чтение файлов, выполнение команд в терминале и т.д. 
 
-Если Open WebUI в Docker:
+**Нюанс реализации:** Официальный веб-API Qwen Chat не принимает инструменты в нативном формате OpenAI (если отправить их напрямую — модель вернёт ошибку `"Tool X does not exists"`). Чтобы обойти это ограничение без потери качества:
+1. Схемы инструментов безопасно впрыскиваются внутрь системного сообщения и последнего запроса пользователя (`prompt-injection`).
+2. Модель генерирует вызовы в виде JSON-блока внутри обычного текстового ответа.
+3. FreeQwenApi парсит этот блок, отрезает лишний текст и отдаёт клиенту (Zed Agent, Claude Desktop и др.) чистые `tool_calls` по стандарту OpenAI.
 
-```text
-Base URL: http://host.docker.internal:3264/api
-API Key: dummy-key
-```
+Работает стабильно даже при больших списках инструментов благодаря сжатию схем (`MAX_SCHEMA_LEN=6000`) и встроенной защите от зацикливания повторяющихся запросов (`anti-loop guards`).
 
-Полная инструкция: [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md)
-
-
-
-## Docker
-
-Сначала добавьте аккаунт локально, потому что внутри контейнера нет GUI для входа:
-
-```bash
-npm run auth
-```
-
-Потом:
-
-```bash
-docker compose up --build -d
-```
-
-В `docker-compose.yml` важно пробросить `session/`:
-
-```yaml
-services:
-  qwen-proxy:
-    build: .
-    environment:
-      - SKIP_ACCOUNT_MENU=true
-      - PORT=3264
-    ports:
-      - "3264:3264"
-    volumes:
-      - ./session:/app/session
-      - ./logs:/app/logs
-      - ./uploads:/app/uploads
-```
-
-## Рекомендуемые модели
-
-- **Обычный чат / агенты**: `qwen3.7-max`
-- **Быстрее и легче**: `qwen3.7-plus`
-- **Кодинг**: `qwen3-coder-plus`
-- **Open WebUI default**: `qwen3.7-max`
+## Мультиаккаунты и лимиты (Rate Limits)
+Бесплатные и базовые аккаунты Qwen ограничивают количество запросов в минуту/час. FreeQwenApi умеет хранить несколько аккаунтов одновременно:
+- `npm run auth -- --add` — добавить новый аккаунт.
+- Когда текущий аккаунт упирается в лимит → сервер автоматически переключается на следующий доступный аккаунт (round-robin ротация).
+- Статусы аккаунтов отслеживаются: `OK` / `WAIT` / `INVALID`.
 
 ## Полезные команды
 
-```bash
-npm run auth                  # управление аккаунтами
-npm run models:sync           # обновить список моделей
-npm run smoke                 # быстрая проверка API
-SKIP_ACCOUNT_MENU=true npm start
-```
+| Команда | Описание |
+|---------|----------|
+| `npm start` | Запустить сервер прокси |
+| `npm run auth -- --add` | Добавить новый аккаунт Qwen (откроется браузер) |
+| `npm run auth -- --list` / `--remove` | Просмотреть или удалить сохранённые аккаунты |
+| `npm run auth -- --relogin` | Обновить устаревшие токены без полной перенастройки |
+| `npm run models:sync` | Скачать свежий список моделей с сайта Qwen Chat |
+| `npm run smoke` | Быстрая проверка живучести API (health + chat) |
+| `npm test` | Запуск 46 юнит-тестов (Node.js test runner, без браузера) |
+| `npm run lint` / `format` | Проверка стиля кода (ESLint + Prettier) |
 
-Проверки руками:
+## Ограничения и нюансы
 
-```bash
-curl http://localhost:3264/api/health
-curl http://localhost:3264/api/status
-curl http://localhost:3264/api/models
-```
+- **Неофициальный прокси.** Qwen может менять структуру сайта или внутренние URL API. Код проекта адаптируется под эти изменения, но базовая логика может требовать обновления репозитория.
+- **Контекст "грязной" памяти модели.** Если на вашем аккаунте Qwen накопилось много старых диалогов и персонализации — модель (особенно `qwen3.7-max`) может иногда игнорировать инструкции и отвечать просто текстом вместо вызова инструментов. Очистка куков/кэша сайта в браузере или переключение на модель `qwen3-coder-plus` решают проблему мгновенно.
+- **Race condition ("in progress").** Qwen обрабатывает SSE-сессии несколько секунд после получения полного ответа. Если вы шлёте следующий запрос через миллисекунды — сервер вернёт `"chat is in progress"`. FreeQwenApi сам делает небольшую паузу (~1-2 сек) и повторяет отправку на тот же чат, чтобы не терять контекст диалога (см. документацию).
+- **Память браузера.** При очень долгих непрерывных сессиях (>100 вызовов подряд) Chromium потребляет больше RAM. Встроенный сборщик мусора (GC) закрывает страницы, простаивающие дольше 5 минут, а жёсткий лимит в 5 одновременных страниц не даёт серверу упасть с `OutOfMemory`.
 
-## Разработка
+## Документация разработчика
 
-**ESLint + Prettier** — установлен и настроен. Запуск перед коммитом:
+Полная техническая информация о архитектуре, структуре модулей и истории изменений:
 
-```bash
-npm run lint          # найти проблемы
-npm run lint:fix      # автофикс (где возможно)
-npm run format        # форматирование Prettier
-```
-
-**Тесты + покрытие:**
-
-```bash
-npm test              # юнит-тесты (43 теста, node:test)
-npm run test:cov      # тесты с coverage report (c8)
-```
-
-## Документация
-
-- [docs/FORK_DEMO_QUICKSTART.md](docs/FORK_DEMO_QUICKSTART.md) — быстрый сценарий для демо.
-- [docs/QWEN_CHAT_MODELS.md](docs/QWEN_CHAT_MODELS.md) — отчёт синхронизации моделей Qwen Chat.
-- [docs/OPENWEBUI_SETUP.md](docs/OPENWEBUI_SETUP.md) — подключение Open WebUI.
-
-## Ограничения
-
-- Это неофициальный browser-based proxy, Qwen может менять внутренний API.
-- Аккаунты Qwen Chat могут ловить лимиты; используйте несколько аккаунтов для round-robin.
-- Токены истекают — используйте `npm run auth -- --relogin`.
-- Для production используйте осторожно: это инструмент для экспериментов, демо и локальных workflow.
+- [docs/01_STATUS.md](docs/01_STATUS.md) — текущий статус стабильности системы
+- [docs/02_ARCHITECTURE.md](docs/02_ARCHITECTURE.md) — диаграммы потоков данных (нормальный запрос vs agent-loop + race condition fix)
+- [docs/03_CODE_MAP.md](docs/03_CODE_MAP.md) — карта модулей, ключевые интерфейсы и константы конфигурации
+- [docs/05_CHANGELOG.md](docs/05_CHANGELOG.md) — полная история развития (сессии 1–42)
+- [docs/06_OPEN_QUESTIONS.md](docs/06_OPEN_QUESTIONS.md) — открытые задачи, известные quirks и ограничения
 
 ## Поддержать автора
 
-Если проект помог — пишите: `mandrykinsergey@gmail.com` | [twitch.tv/dnovitv](https://www.twitch.tv/dnovitv)
+Если проект пришёлся по вкусу или сэкономил ваше время — пишите:  
+`mandrykinsergey@gmail.com` | [twitch.tv/dnovitv](https://www.twitch.tv/dnovitv)
