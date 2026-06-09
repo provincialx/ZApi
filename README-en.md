@@ -63,7 +63,11 @@ npm run smoke
 5. Set **Model** to your preferred option (`qwen3-coder-plus` or `qwen3.7-max` recommended)
 6. Save. Zed Agent is now ready to use.
 
+=====================================================================
+
 > **⚠️ Important:** In your chat.qwen.ai profile → Personalization — disable all toggles, set style to "Concise", and clear any saved memory.
+
+=====================================================================
 
 **Test:** Press `Cmd+L` to open the AI panel and ask any question about your code.
 
