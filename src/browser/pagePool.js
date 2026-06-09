@@ -37,9 +37,7 @@ export async function createPage(context) {
           return await browser.newPage();
         }
       } catch (error) {
-        logWarn(
-          `Не удалось создать новую страницу из текущего контекста: ${error.message}`,
-        );
+        logWarn(`Не удалось создать новую страницу из текущего контекста: ${error.message}`);
       }
     }
 
@@ -50,33 +48,23 @@ export async function createPage(context) {
     return context;
   }
 
-  throw new Error(
-    "Неверный контекст: не страница Puppeteer, не контекст Playwright",
-  );
+  throw new Error("Неверный контекст: не страница Puppeteer, не контекст Playwright");
 }
 
 // ─── Evaluate with timeout helper ────────────────────────────────────────────
 // page.evaluate без таймаута блокирует пул страниц бесконечно.
 // Promise.race выбрасывает Error если CDP-соединение деградировало.
-export const EVALUATE_HEALTH_TIMEOUT =
-  Number(process.env.EVALUATE_HEALTH_TIMEOUT) || 5_000;
+export const EVALUATE_HEALTH_TIMEOUT = Number(process.env.EVALUATE_HEALTH_TIMEOUT) || 5_000;
 
 /**
  * Wraps page.evaluate() with a timeout via Promise.race.
  * Prevents CDP-dead pages from blocking the pool forever.
  */
-export async function evaluateWithTimeout(
-  page,
-  fn,
-  timeoutMs = EVALUATE_HEALTH_TIMEOUT,
-) {
+export async function evaluateWithTimeout(page, fn, timeoutMs = EVALUATE_HEALTH_TIMEOUT) {
   return Promise.race([
     page.evaluate(fn),
     new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`page.evaluate timed out after ${timeoutMs}ms`)),
-        timeoutMs,
-      ),
+      setTimeout(() => reject(new Error(`page.evaluate timed out after ${timeoutMs}ms`)), timeoutMs)
     ),
   ]);
 }
@@ -118,9 +106,7 @@ const pagePool = {
 
     // Enforce hard limit on active pages
     while (this.activeCount >= MAX_ACTIVE_PAGES) {
-      logWarn(
-        `🔒 Active page limit reached (${MAX_ACTIVE_PAGES}), waiting for page release...`,
-      );
+      logWarn(`🔒 Active page limit reached (${MAX_ACTIVE_PAGES}), waiting for page release...`);
       await delay(500);
     }
 
@@ -143,9 +129,7 @@ const pagePool = {
         this.activeCount++;
         return page;
       } catch (e) {
-        logWarn(
-          `Страница из пула протухла (${e.message?.substring(0, 60)}), создаём новую`,
-        );
+        logWarn(`Страница из пула протухла (${e.message?.substring(0, 60)}), создаём новую`);
         if (page !== baseContext) {
           try {
             await page.close();
@@ -170,9 +154,7 @@ const pagePool = {
         const currentToken = getAuthToken();
         if (!currentToken) {
           try {
-            const newToken = await newPage.evaluate(() =>
-              localStorage.getItem("token"),
-            );
+            const newToken = await newPage.evaluate(() => localStorage.getItem("token"));
             if (newToken) {
               saveAuthToken(newToken);
               logDebug("Токен авторизации получен из новой страницы в пуле");
@@ -187,7 +169,7 @@ const pagePool = {
       } catch (e) {
         lastError = e;
         logWarn(
-          `goto CHAT_PAGE_URL попытка ${attempt}/${maxGotoAttempts} не удалась: ${e.message?.substring(0, 80)}`,
+          `goto CHAT_PAGE_URL попытка ${attempt}/${maxGotoAttempts} не удалась: ${e.message?.substring(0, 80)}`
         );
         if (attempt < maxGotoAttempts) {
           await delay(RETRY_DELAY * attempt); // exponential backoff
@@ -220,9 +202,7 @@ const pagePool = {
     if (this.pages.length < this.maxSize) {
       this.pages.push({ page, lastUsed: Date.now() });
     } else {
-      import("../logger/index.js").then(({ logError }) =>
-        page.close().catch(logError),
-      );
+      import("../logger/index.js").then(({ logError }) => page.close().catch(logError));
     }
   },
 
@@ -258,9 +238,7 @@ const pagePool = {
       if (idle > PAGE_IDLE_TTL_MS) {
         if (entry.page !== baseContext) {
           entry.page.close().catch(() => {});
-          logDebug(
-            `🗑 GC: closed idle page (idle ${Math.round(idle / 1000)}s)`,
-          );
+          logDebug(`🗑 GC: closed idle page (idle ${Math.round(idle / 1000)}s)`);
         }
       } else {
         kept.push(entry);
@@ -270,9 +248,7 @@ const pagePool = {
     this.pages = kept;
     const evicted = before - kept.length;
     if (evicted > 0) {
-      logInfo(
-        `🗑 Page GC: evicted ${evicted} idle pages, ${kept.length} remaining in pool`,
-      );
+      logInfo(`🗑 Page GC: evicted ${evicted} idle pages, ${kept.length} remaining in pool`);
     }
   },
 
@@ -285,7 +261,7 @@ const pagePool = {
     // Allow Node to exit even if timer is still running
     if (this._gcTimer.unref) this._gcTimer.unref();
     logDebug(
-      `🔄 Page GC started (interval ${PAGE_GC_INTERVAL_MS / 1000}s, TTL ${PAGE_IDLE_TTL_MS / 1000}s)`,
+      `🔄 Page GC started (interval ${PAGE_GC_INTERVAL_MS / 1000}s, TTL ${PAGE_IDLE_TTL_MS / 1000}s)`
     );
   },
 

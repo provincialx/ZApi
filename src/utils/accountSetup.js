@@ -2,18 +2,9 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import {
-  initBrowser,
-  shutdownBrowser,
-  getBrowserContext,
-} from "../browser/browser.js";
+import { initBrowser, shutdownBrowser, getBrowserContext } from "../browser/browser.js";
 import { extractAuthToken } from "../api/chat.js";
-import {
-  loadTokens,
-  saveTokens,
-  markValid,
-  removeToken,
-} from "../api/tokenManager.js";
+import { loadTokens, saveTokens, markValid, removeToken } from "../api/tokenManager.js";
 import { loadAuthToken } from "../browser/session.js";
 import { logInfo, logError, logWarn } from "../logger/index.js";
 import { prompt } from "./prompt.js";
@@ -23,14 +14,7 @@ import { SESSION_DIR, ACCOUNTS_DIR } from "../config.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function ensureAccountDir(id) {
-  const accountDir = path.resolve(
-    __dirname,
-    "..",
-    "..",
-    SESSION_DIR,
-    ACCOUNTS_DIR,
-    id,
-  );
+  const accountDir = path.resolve(__dirname, "..", "..", SESSION_DIR, ACCOUNTS_DIR, id);
   if (!fs.existsSync(accountDir)) fs.mkdirSync(accountDir, { recursive: true });
   return accountDir;
 }
@@ -67,17 +51,9 @@ export async function addAccountInteractive() {
   const id = "acc_" + Date.now();
   ensureAccountDir(id);
   fs.writeFileSync(
-    path.resolve(
-      __dirname,
-      "..",
-      "..",
-      SESSION_DIR,
-      ACCOUNTS_DIR,
-      id,
-      "token.txt",
-    ),
+    path.resolve(__dirname, "..", "..", SESSION_DIR, ACCOUNTS_DIR, id, "token.txt"),
     token,
-    "utf8",
+    "utf8"
   );
 
   const list = loadTokens();
@@ -139,17 +115,9 @@ export async function reloginAccountInteractive() {
 
   markValid(account.id, token);
   fs.writeFileSync(
-    path.resolve(
-      __dirname,
-      "..",
-      "..",
-      SESSION_DIR,
-      ACCOUNTS_DIR,
-      account.id,
-      "token.txt",
-    ),
+    path.resolve(__dirname, "..", "..", SESSION_DIR, ACCOUNTS_DIR, account.id, "token.txt"),
     token,
-    "utf8",
+    "utf8"
   );
   logInfo(`Токен обновлён для ${account.id}`);
 }
@@ -164,9 +132,7 @@ export async function removeAccountInteractive() {
 
   console.log("\nДоступные аккаунты:");
   tokens.forEach((t, idx) => console.log(`${idx + 1} - ${t.id}`));
-  const choice = await prompt(
-    "Номер аккаунта, который нужно удалить (или ENTER для отмены): ",
-  );
+  const choice = await prompt("Номер аккаунта, который нужно удалить (или ENTER для отмены): ");
   if (!choice) return;
   const num = parseInt(choice, 10);
   if (isNaN(num) || num < 1 || num > tokens.length) {
@@ -180,14 +146,7 @@ export async function removeAccountInteractive() {
   if (confirm.toLowerCase() !== "y") return;
 
   removeToken(acc.id);
-  const dir = path.resolve(
-    __dirname,
-    "..",
-    "..",
-    SESSION_DIR,
-    ACCOUNTS_DIR,
-    acc.id,
-  );
+  const dir = path.resolve(__dirname, "..", "..", SESSION_DIR, ACCOUNTS_DIR, acc.id);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 
   logInfo(`Аккаунт ${acc.id} удалён.`);

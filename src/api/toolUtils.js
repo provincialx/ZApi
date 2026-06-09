@@ -9,19 +9,14 @@ export function truncateForPrompt(text, maxLen = 100) {
 export function compactJsonSchema(schema, depth = 0) {
   if (!schema || typeof schema !== "object" || depth > 2) return schema;
   if (Array.isArray(schema))
-    return schema
-      .slice(0, 20)
-      .map((item) => compactJsonSchema(item, depth + 1));
+    return schema.slice(0, 20).map((item) => compactJsonSchema(item, depth + 1));
 
   const out = {};
   for (const key of ["type", "enum", "required", "default"]) {
     if (schema[key] !== undefined) out[key] = schema[key];
   }
   if (schema.description)
-    out.description = truncateForPrompt(
-      schema.description,
-      depth === 0 ? 180 : 90,
-    );
+    out.description = truncateForPrompt(schema.description, depth === 0 ? 180 : 90);
   if (schema.properties && typeof schema.properties === "object") {
     out.properties = {};
     for (const [name, prop] of Object.entries(schema.properties)) {
@@ -45,8 +40,7 @@ function _buildCompactTools(tools) {
       const fn = tool?.function || tool;
       if (!fn?.name) return null;
       const item = { name: fn.name };
-      if (fn.description)
-        item.description = truncateForPrompt(fn.description, 120);
+      if (fn.description) item.description = truncateForPrompt(fn.description, 120);
       if (fn.parameters && typeof fn.parameters === "object") {
         item.parameters = compactJsonSchema(fn.parameters);
       }
@@ -71,8 +65,7 @@ export function toolsToPrompt(tools) {
   if (schemaStr.length > MAX_SCHEMA_LEN) {
     // Strip descriptions from all but last few tools to save tokens
     const trimmed = compact.map((t, i) => {
-      if (i < compact.length - 5)
-        return { name: t.name, parameters: { type: "object" } };
+      if (i < compact.length - 5) return { name: t.name, parameters: { type: "object" } };
       return t;
     });
     schemaStr = JSON.stringify(trimmed, null, 0);
@@ -184,8 +177,7 @@ function _repairTruncatedBraces(text) {
  * Mirrors Python fork's parse_tool_call_parts for Zed Agent compatibility.
  */
 export function parseToolCallParts(content) {
-  if (typeof content !== "string" || !content.trim())
-    return { visible: null, calls: null };
+  if (typeof content !== "string" || !content.trim()) return { visible: null, calls: null };
 
   let text = content.trim();
 
@@ -293,10 +285,7 @@ export function parseToolCallParts(content) {
     ) {
       attempts.push(candidateSlice.replace(/\}\]\}\s*$/, "}}]}"));
     }
-    if (
-      /^\s*\{\s*"tool_calls"\s*:\s*\[/.test(candidateSlice) &&
-      !/\}\s*$/.test(candidateSlice)
-    ) {
+    if (/^\s*\{\s*"tool_calls"\s*:\s*\[/.test(candidateSlice) && !/\}\s*$/.test(candidateSlice)) {
       attempts.push(candidateSlice + "}");
     }
 
@@ -333,18 +322,11 @@ export function normalizeToolCalls(calls) {
   return calls
     .map((call, index) => {
       const name = call.name || call.tool || call.function?.name;
-      const rawArgs =
-        call.arguments ??
-        call.args ??
-        call.input ??
-        call.function?.arguments ??
-        {};
+      const rawArgs = call.arguments ?? call.args ?? call.input ?? call.function?.arguments ?? {};
       const args = _normalizeArgs(rawArgs);
       if (!name) return null;
       return {
-        id:
-          call.id ||
-          `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+        id: call.id || `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
         type: "function",
         function: { name, arguments: args },
         index,
@@ -382,12 +364,10 @@ export function toolsToLightPrompt(tools) {
   if (schemaStr.length > MAX_SCHEMA_LEN) {
     schemaStr = JSON.stringify(
       compact.map((t, i) =>
-        i < compact.length - 5
-          ? { name: t.name, parameters: { type: "object" } }
-          : t,
+        i < compact.length - 5 ? { name: t.name, parameters: { type: "object" } } : t
       ),
       null,
-      0,
+      0
     );
   }
 

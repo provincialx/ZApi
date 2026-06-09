@@ -7,12 +7,7 @@ import apiRoutes from "./src/api/routes.js";
 import { getAvailableModelsFromFile, getApiKeys } from "./src/api/chat.js";
 import { loadTokens } from "./src/api/tokenManager.js";
 import { addAccountInteractive } from "./src/utils/accountSetup.js";
-import {
-  logHttpRequest,
-  logInfo,
-  logError,
-  logWarn,
-} from "./src/logger/index.js";
+import { logHttpRequest, logInfo, logError, logWarn } from "./src/logger/index.js";
 import { prompt } from "./src/utils/prompt.js";
 import { CONTACT_INFO, FORGETMEAI_WATERMARK } from "./src/utils/branding.js";
 import { PORT, HOST } from "./src/config.js";
@@ -32,29 +27,24 @@ function toBoolean(value) {
 }
 
 const skipAccountMenu =
-  toBoolean(process.env.SKIP_ACCOUNT_MENU) ||
-  toBoolean(process.env.NON_INTERACTIVE);
+  toBoolean(process.env.SKIP_ACCOUNT_MENU) || toBoolean(process.env.NON_INTERACTIVE);
 
 function ensureNonInteractiveTokens() {
   const tokens = loadTokens();
   if (!tokens.length) {
-    logError(
-      "Не найдено ни одного аккаунта. Запустите скрипт авторизации перед запуском сервера.",
-    );
+    logError("Не найдено ни одного аккаунта. Запустите скрипт авторизации перед запуском сервера.");
     process.exit(1);
   }
   const now = Date.now();
   const validTokens = tokens.filter(
-    (t) => (!t.resetAt || new Date(t.resetAt).getTime() <= now) && !t.invalid,
+    (t) => (!t.resetAt || new Date(t.resetAt).getTime() <= now) && !t.invalid
   );
   if (!validTokens.length) {
-    logError(
-      "Все аккаунты недоступны. Перезапустите авторизацию перед запуском сервера.",
-    );
+    logError("Все аккаунты недоступны. Перезапустите авторизацию перед запуском сервера.");
     process.exit(1);
   }
   logInfo(
-    `Автоматический запуск: обнаружено ${tokens.length} аккаунтов, из них ${validTokens.length} активны.`,
+    `Автоматический запуск: обнаружено ${tokens.length} аккаунтов, из них ${validTokens.length} активны.`
   );
 }
 
@@ -72,8 +62,7 @@ app.use((err, req, res, next) => {
     logWarn(`Некорректный JSON в запросе: ${err.message}`);
     return res.status(400).json({
       error: "Некорректный JSON",
-      message:
-        "Проверьте тело запроса: используйте валидный JSON с двойными кавычками.",
+      message: "Проверьте тело запроса: используйте валидный JSON с двойными кавычками.",
     });
   }
 
@@ -85,7 +74,7 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.header(
     "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, Authorization",
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization"
   );
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
@@ -142,9 +131,7 @@ async function startServer() {
         tokens.forEach((token, i) => {
           const now = Date.now();
           const isInvalid = token.invalid === true;
-          const isWaiting = Boolean(
-            token.resetAt && new Date(token.resetAt).getTime() > now,
-          );
+          const isWaiting = Boolean(token.resetAt && new Date(token.resetAt).getTime() > now);
           const statusLabel = isInvalid
             ? "❌ Недействителен"
             : isWaiting
@@ -152,7 +139,7 @@ async function startServer() {
               : "✅ OK";
           const statusCode = isInvalid ? 0 : isWaiting ? 1 : 2;
           console.log(
-            `${String(i + 1).padStart(2, " ")} | ${token.id} | ${statusLabel} (${statusCode})`,
+            `${String(i + 1).padStart(2, " ")} | ${token.id} | ${statusLabel} (${statusCode})`
           );
         });
       }
@@ -169,8 +156,7 @@ async function startServer() {
       if (choice === "1") {
         await addAccountInteractive();
       } else if (choice === "2") {
-        const { reloginAccountInteractive } =
-          await import("./src/utils/accountSetup.js");
+        const { reloginAccountInteractive } = await import("./src/utils/accountSetup.js");
         await reloginAccountInteractive();
       } else if (choice === "3") {
         const hasValidToken = tokens.some((t) => {
@@ -184,8 +170,7 @@ async function startServer() {
         }
         break;
       } else if (choice === "4") {
-        const { removeAccountInteractive } =
-          await import("./src/utils/accountSetup.js");
+        const { removeAccountInteractive } = await import("./src/utils/accountSetup.js");
         await removeAccountInteractive();
       }
     }

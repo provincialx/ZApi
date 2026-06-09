@@ -11,13 +11,7 @@ const __dirname = path.dirname(__filename);
 export const PROJECT_ROOT = path.resolve(__dirname, "../../..");
 
 // Exclusions for scan (match .rules §4 description)
-const EXCLUDE_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "session",
-  "logs",
-  "uploads",
-]);
+const EXCLUDE_DIRS = new Set(["node_modules", ".git", "session", "logs", "uploads"]);
 const WHITELIST = new Set([".agent-brief.md", ".rules"]);
 
 let _cache = "";

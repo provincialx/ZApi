@@ -10,15 +10,8 @@ import { logInfo, logError, logWarn } from "../logger/index.js";
 
 // Page pool (browser layer) — re-exported for backward compatibility:
 // fileUpload.js, browser.js, auth.js import pagePool here.
-export {
-  evaluateWithTimeout,
-  EVALUATE_HEALTH_TIMEOUT,
-} from "../browser/pagePool.js";
-import {
-  setAuthTokenGetter,
-  pagePool,
-  createPage,
-} from "../browser/pagePool.js";
+export { evaluateWithTimeout, EVALUATE_HEALTH_TIMEOUT } from "../browser/pagePool.js";
+import { setAuthTokenGetter, pagePool, createPage } from "../browser/pagePool.js";
 export { pagePool, createPage };
 
 // Qwen API layer — re-exported for backward compatibility:
@@ -56,12 +49,7 @@ setAuthTokenGetter(() => _authToken);
 
 // ─── Token extraction (browser layer) ──────────────────────────────────────
 
-import {
-  CHAT_PAGE_URL,
-  PAGE_TIMEOUT,
-  RETRY_DELAY,
-  DEFAULT_MODEL,
-} from "../config.js";
+import { CHAT_PAGE_URL, PAGE_TIMEOUT, RETRY_DELAY, DEFAULT_MODEL } from "../config.js";
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function extractAuthToken(context, forceRefresh = false) {

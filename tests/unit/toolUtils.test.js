@@ -74,8 +74,7 @@ describe("toolUtils", () => {
     });
 
     it("parses JSON tool call blocks", () => {
-      const text =
-        'Some text\n```json\n{"name": "test", "arguments": {"x": 1}}\n```\nmore';
+      const text = 'Some text\n```json\n{"name": "test", "arguments": {"x": 1}}\n```\nmore';
       const result = parseToolCallParts(text);
       assert.ok(result && Array.isArray(result.calls));
     });

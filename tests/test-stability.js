@@ -46,7 +46,9 @@ async function run() {
     {
       role: "assistant",
       content: null,
-      tool_calls: [{ id: "call_abc", type: "function", function: { name: "get_weather", arguments: '{}' } }],
+      tool_calls: [
+        { id: "call_abc", type: "function", function: { name: "get_weather", arguments: "{}" } },
+      ],
     },
     { role: "tool", content: '"Sunny, 25C"', tool_call_id: "call_abc" },
   ];
@@ -73,11 +75,17 @@ async function run() {
   const res3 = await fetch(`${BASE}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "qwen3.7-max", stream: true, messages: [{ role: "user", content: "Reply with one word: streaming" }] }),
+    body: JSON.stringify({
+      model: "qwen3.7-max",
+      stream: true,
+      messages: [{ role: "user", content: "Reply with one word: streaming" }],
+    }),
   });
 
   console.log(`  Status: ${res3.ok ? "OK" : res3.status}`);
-  console.log(`  Content-Type includes event-stream: ${res3.headers.get("content-type").includes("text/event-stream")}`);
+  console.log(
+    `  Content-Type includes event-stream: ${res3.headers.get("content-type").includes("text/event-stream")}`
+  );
 
   // Quick read first chunk to verify stream works
   const reader = res3.body?.getReader();

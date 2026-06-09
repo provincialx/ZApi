@@ -15,10 +15,7 @@ import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
 import { getMappedModel } from "./modelMapping.js";
 import { loadHistory, saveHistory } from "./chatHistory.js";
 import crypto from "crypto";
-import {
-  ALLOW_UNSCOPED_SESSION_CHAT_RESTORE,
-  REQUEST_TIMEOUT_MINUTES,
-} from "../config.js";
+import { ALLOW_UNSCOPED_SESSION_CHAT_RESTORE, REQUEST_TIMEOUT_MINUTES } from "../config.js";
 
 // ─── Chat Session (idempotency, chat ID resolution, scoped sessions) ──────────
 import {
@@ -58,10 +55,7 @@ import { buildProjectContext } from "./projectContext.js";
 import { withRequestTimeout } from "./timeoutWrapper.js";
 
 // ─── Response Builders (streaming, tool calls SSE) ─────────────────────────
-import {
-  buildOpenAIToolResponse,
-  writeToolCallsSse,
-} from "./responseBuilders.js";
+import { buildOpenAIToolResponse, writeToolCallsSse } from "./responseBuilders.js";
 
 const router = express.Router();
 
@@ -107,15 +101,12 @@ router.get("/chat/completions", (req, res) => {
 
 router.post("/chat/completions", async (req, res) => {
   try {
-    const { messages, model, stream, tools, functions, tool_choice, chatId } =
-      req.body;
+    const { messages, model, stream, tools, functions, tool_choice, chatId } = req.body;
     const snakeCaseChatId = normalizeIdValue(req.body?.chat_id);
     const explicitChatId = normalizeIdValue(chatId) || snakeCaseChatId;
     const explicitParentId = extractParentHint(req);
     const conversationHint = extractConversationHint(req);
-    const conversationScope = conversationHint
-      ? `conversation:${conversationHint}`
-      : null;
+    const conversationScope = conversationHint ? `conversation:${conversationHint}` : null;
     const forceNewChat = shouldForceNewChat(req);
     logInfo(`Получен OpenAI-совместимый запрос${stream ? " (stream)" : ""}`);
 
@@ -133,16 +124,12 @@ router.post("/chat/completions", async (req, res) => {
     if (forceNewChat && !explicitChatId && !isMeta) {
       effectiveChatId = `chat_${crypto.randomBytes(8).toString("hex")}`;
       effectiveParentId = null;
-      logInfo(
-        `Принудительно запрошен новый чат (newChat/resetChat): ${effectiveChatId}`,
-      );
+      logInfo(`Принудительно запрошен новый чат (newChat/resetChat): ${effectiveChatId}`);
     }
 
     if (!effectiveChatId && !isMeta) {
       if (conversationHint) {
-        const scopedSession = forceNewChat
-          ? null
-          : getSavedChatId(req, conversationScope);
+        const scopedSession = forceNewChat ? null : getSavedChatId(req, conversationScope);
         if (scopedSession?.chatId) {
           effectiveChatId = scopedSession.chatId;
           if (!effectiveParentId && scopedSession.parentId) {
@@ -171,9 +158,7 @@ router.post("/chat/completions", async (req, res) => {
           }
         }
       } else {
-        logDebug(
-          "chatId/conversation_id не переданы, unscoped session fallback отключён",
-        );
+        logDebug("chatId/conversation_id не переданы, unscoped session fallback отключён");
       }
     }
 
@@ -186,13 +171,11 @@ router.post("/chat/completions", async (req, res) => {
       messages,
       combinedTools,
       effectiveChatId,
-      model,
+      model
     );
     if (preparedInput.missingUser) {
       logError("В запросе нет сообщений от пользователя");
-      return res
-        .status(400)
-        .json({ error: "В запросе нет сообщений от пользователя" });
+      return res.status(400).json({ error: "В запросе нет сообщений от пользователя" });
     }
 
     let messageContent = preparedInput.messageContent;
@@ -216,16 +199,14 @@ router.post("/chat/completions", async (req, res) => {
     const files = preparedInput.files || []; // ← ИЗВЛЕКАЕМ FILES
     if (preparedInput.folded) {
       logInfo(
-        "OpenAI transcript folded into single user message for context/tool-result preservation",
+        "OpenAI transcript folded into single user message for context/tool-result preservation"
       );
     }
 
     if (isMeta) {
       effectiveChatId = null;
       effectiveParentId = null;
-      logDebug(
-        "OpenWebUI meta-запрос: используем отдельный чат (без привязки к сессии)",
-      );
+      logDebug("OpenWebUI meta-запрос: используем отдельный чат (без привязки к сессии)");
     }
 
     let mappedModel = model ? getMappedModel(model) : "qwen-max-latest";
@@ -235,7 +216,7 @@ router.post("/chat/completions", async (req, res) => {
     logInfo(`Используется модель: ${mappedModel}`);
     if (systemMessage)
       logInfo(
-        `System message: ${systemMessage.substring(0, 50)}${systemMessage.length > 50 ? "..." : ""}`,
+        `System message: ${systemMessage.substring(0, 50)}${systemMessage.length > 50 ? "..." : ""}`
       );
 
     // Detect agent-loop: history has tool results — use lightweight prompt to prevent infinite tool loops.
@@ -247,13 +228,9 @@ router.post("/chat/completions", async (req, res) => {
     // — Qwen mirrors error text creating hallucination loop. Let it answer naturally instead.
     const allFailed = areAllToolsFailed(messages);
     if (allFailed) {
-      logInfo(
-        `🗑 All tools failed in history — skipping tool prompt to break hallucination loop`,
-      );
+      logInfo(`🗑 All tools failed in history — skipping tool prompt to break hallucination loop`);
     } else if (inAgentLoop) {
-      logInfo(
-        `🔁 Agent-loop detected — tool history present, using light tool prompt`,
-      );
+      logInfo(`🔁 Agent-loop detected — tool history present, using light tool prompt`);
     }
 
     const qwenTools = null; // Qwen Chat web API не умеет OpenAI tool schemas
@@ -262,11 +239,7 @@ router.post("/chat/completions", async (req, res) => {
     // Mixing verbose + light creates conflicting instructions that confuse Qwen
     // into generating plain text instead of JSON tool_calls.
     let zedToolsPrompt = "";
-    if (
-      !allFailed &&
-      Array.isArray(combinedTools) &&
-      combinedTools.length > 0
-    ) {
+    if (!allFailed && Array.isArray(combinedTools) && combinedTools.length > 0) {
       zedToolsPrompt = inAgentLoop
         ? toolsToLightPrompt(combinedTools)
         : toolsToPrompt(combinedTools);
@@ -276,8 +249,7 @@ router.post("/chat/completions", async (req, res) => {
     // Qwen Chat API ignores system_message when continuing existing chats,
     // so instructions MUST be in the user-facing message text to take effect.
     if (zedToolsPrompt) {
-      const prefix =
-        zedToolsPrompt + "\n\nПользовательский запрос / текущий контекст:\n";
+      const prefix = zedToolsPrompt + "\n\nПользовательский запрос / текущий контекст:\n";
       if (typeof messageContent === "string") {
         messageContent = prefix + messageContent;
       } else if (Array.isArray(messageContent)) {
@@ -315,12 +287,10 @@ router.post("/chat/completions", async (req, res) => {
     logInfo(
       `История: ${messages.length} сообщений (${Object.entries(roleCounts)
         .map(([r, c]) => `${c}${c > 1 ? "x" : ""} ${r}`)
-        .join(", ")})`,
+        .join(", ")})`
     );
     if (effectiveChatId) {
-      logInfo(
-        `Используется chatId: ${effectiveChatId}, parentId: ${effectiveParentId || "null"}`,
-      );
+      logInfo(`Используется chatId: ${effectiveChatId}, parentId: ${effectiveParentId || "null"}`);
     }
 
     if (stream) {
@@ -337,16 +307,12 @@ router.post("/chat/completions", async (req, res) => {
       };
 
       try {
-        const qwenChatId = await resolveQwenChatId(
-          effectiveChatId,
-          mappedModel,
-        );
+        const qwenChatId = await resolveQwenChatId(effectiveChatId, mappedModel);
 
         // Setup streaming callback if stream=true
         let streamingCallback = null;
         let hasStreamedChunks = false;
-        const captureToolCalls =
-          Array.isArray(combinedTools) && combinedTools.length > 0;
+        const captureToolCalls = Array.isArray(combinedTools) && combinedTools.length > 0;
         if (stream && !captureToolCalls) {
           streamingCallback = (chunk) => {
             hasStreamedChunks = true;
@@ -355,9 +321,7 @@ router.post("/chat/completions", async (req, res) => {
               object: "chat.completion.chunk",
               created: Math.floor(Date.now() / 1000),
               model: mappedModel || "qwen-max-latest",
-              choices: [
-                { index: 0, delta: { content: chunk }, finish_reason: null },
-              ],
+              choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
             });
           };
         }
@@ -369,9 +333,7 @@ router.post("/chat/completions", async (req, res) => {
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
             model: mappedModel || "qwen-max-latest",
-            choices: [
-              { index: 0, delta: { role: "assistant" }, finish_reason: null },
-            ],
+            choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
           });
           logDebug("Thinking placeholder sent (tool-capture mode)");
         }
@@ -386,9 +348,7 @@ router.post("/chat/completions", async (req, res) => {
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
             model: mappedModel || "qwen-max-latest",
-            choices: [
-              { index: 0, delta: { role: "assistant" }, finish_reason: null },
-            ],
+            choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
           });
           const cachedContent = cachedResult.choices?.[0]?.message?.content;
           if (cachedContent)
@@ -427,8 +387,8 @@ router.post("/chat/completions", async (req, res) => {
             qwenTools,
             tool_choice,
             finalSystemMessage,
-            streamingCallback,
-          ),
+            streamingCallback
+          )
         );
 
         // Parse tool calls — always capture the parsed result for fallback use.
@@ -446,9 +406,7 @@ router.post("/chat/completions", async (req, res) => {
             const blocked = getBlockedToolCalls(toolCalls, messages);
 
             if (repeated.length > 0) {
-              logInfo(
-                `🔁 Anti-loop guard: ${repeated.join(", ")} уже выполнялись`,
-              );
+              logInfo(`🔁 Anti-loop guard: ${repeated.join(", ")} уже выполнялись`);
               const fallbackContent =
                 parts?.visible ||
                 "Останавливаю повторные вызовы инструментов. Модель получила результат — перейди к следующему шагу.";
@@ -483,7 +441,7 @@ router.post("/chat/completions", async (req, res) => {
                 conversationScope,
                 mappedModel,
                 req,
-                effectiveParentId,
+                effectiveParentId
               );
               return;
             }
@@ -491,15 +449,9 @@ router.post("/chat/completions", async (req, res) => {
 
           if (toolCalls && toolCalls.length > 0) {
             logInfo(
-              `🔨 Writing ${toolCalls.length} tool calls via SSE (${Array.isArray(parts?.visible) ? "text" : "json"} format)`,
+              `🔨 Writing ${toolCalls.length} tool calls via SSE (${Array.isArray(parts?.visible) ? "text" : "json"} format)`
             );
-            writeToolCallsSse(
-              res,
-              mappedModel,
-              result,
-              toolCalls,
-              parts.visible,
-            );
+            writeToolCallsSse(res, mappedModel, result, toolCalls, parts.visible);
 
             // Persist session AFTER writeToolCallsSse — captureToolCalls path
             // skips this by returning early, so scoped+default caches need explicit save.
@@ -511,7 +463,7 @@ router.post("/chat/completions", async (req, res) => {
               conversationScope,
               mappedModel,
               req,
-              effectiveParentId,
+              effectiveParentId
             );
 
             // Auto-reset: инкремент toolCallCount, но НЕ сбрасываем СРЕДИ agent loop.
@@ -534,7 +486,7 @@ router.post("/chat/completions", async (req, res) => {
           conversationScope,
           mappedModel,
           req,
-          effectiveParentId,
+          effectiveParentId
         );
 
         // Auto-reset: применяем ТОЛЬКО когда agent loop завершён (модель
@@ -544,12 +496,9 @@ router.post("/chat/completions", async (req, res) => {
         {
           const dc = getModelDefaultChats().get(mappedModel);
           if (dc && !explicitChatId) {
-            if (
-              dc.inAgentLoop &&
-              dc.toolCallCount >= TOOL_CALL_RESET_THRESHOLD
-            ) {
+            if (dc.inAgentLoop && dc.toolCallCount >= TOOL_CALL_RESET_THRESHOLD) {
               logInfo(
-                `♻️ Agent loop ended. Auto-reset: достигнут лимит ${TOOL_CALL_RESET_THRESHOLD} tool calls для ${mappedModel}`,
+                `♻️ Agent loop ended. Auto-reset: достигнут лимит ${TOOL_CALL_RESET_THRESHOLD} tool calls для ${mappedModel}`
               );
               invalidateModelDefaultChat(mappedModel);
             }
@@ -567,7 +516,7 @@ router.post("/chat/completions", async (req, res) => {
           result.choices[0].message.content
         ) {
           logWarn(
-            `Модель не использовала инструменты. Предоставлено: ${combinedTools.length}. Ответ: ${String(result.choices[0].message.content).substring(0, 120)}...`,
+            `Модель не использовала инструменты. Предоставлено: ${combinedTools.length}. Ответ: ${String(result.choices[0].message.content).substring(0, 120)}...`
           );
         }
 
@@ -596,11 +545,7 @@ router.post("/chat/completions", async (req, res) => {
           // When we parsed tool calls and got visible text (stripped of JSON marker),
           // use that to prevent leaking {"tool_calls":[]} into the user-visible response.
           let content = result.choices[0].message.content;
-          if (
-            parts &&
-            typeof parts === "object" &&
-            parts.visible !== undefined
-          ) {
+          if (parts && typeof parts === "object" && parts.visible !== undefined) {
             content = parts.visible || content;
           }
           logDebug(`JSON response content length: ${content.length}`);
@@ -658,8 +603,8 @@ router.post("/chat/completions", async (req, res) => {
           null, // files
           qwenTools,
           tool_choice,
-          finalSystemMessage,
-        ),
+          finalSystemMessage
+        )
       );
 
       persistSessionState(
@@ -670,7 +615,7 @@ router.post("/chat/completions", async (req, res) => {
         conversationScope,
         mappedModel,
         req,
-        effectiveParentId,
+        effectiveParentId
       );
 
       if (result.error) {
@@ -698,26 +643,16 @@ router.post("/chat/completions", async (req, res) => {
       }
 
       if (toolCalls && toolCalls.length > 0) {
-        return res.json(
-          buildOpenAIToolResponse(
-            result,
-            mappedModel,
-            toolCalls,
-            parts.visible,
-          ),
-        );
+        return res.json(buildOpenAIToolResponse(result, mappedModel, toolCalls, parts.visible));
       }
 
       // Auto-reset: apply deferred reset when loop naturally ends (text response)
       {
         const nrdc = getModelDefaultChats().get(mappedModel);
         if (nrdc && !explicitChatId) {
-          if (
-            nrdc.inAgentLoop &&
-            nrdc.toolCallCount >= TOOL_CALL_RESET_THRESHOLD
-          ) {
+          if (nrdc.inAgentLoop && nrdc.toolCallCount >= TOOL_CALL_RESET_THRESHOLD) {
             logInfo(
-              `♻️ Agent loop ended. Non-stream auto-reset: достигнут лимит ${TOOL_CALL_RESET_THRESHOLD} tool calls для ${mappedModel}`,
+              `♻️ Agent loop ended. Non-stream auto-reset: достигнут лимит ${TOOL_CALL_RESET_THRESHOLD} tool calls для ${mappedModel}`
             );
             invalidateModelDefaultChat(mappedModel);
           }

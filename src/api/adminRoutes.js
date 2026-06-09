@@ -2,25 +2,13 @@
 // Вынесено из routes.js для декомпозиции.
 
 import express from "express";
-import {
-  getAllModels,
-  createChatV2,
-  testToken,
-} from "./chat.js";
-import {
-  getAuthenticationStatus,
-  getBrowserContext,
-} from "../browser/browser.js";
+import { getAllModels, createChatV2, testToken } from "./chat.js";
+import { getAuthenticationStatus, getBrowserContext } from "../browser/browser.js";
 import { checkAuthentication } from "../browser/auth.js";
 import { logInfo, logError } from "../logger/index.js";
 import { getMappedModel } from "./modelMapping.js";
 import { DEFAULT_MODEL } from "../config.js";
-import {
-  listTokens,
-  markInvalid,
-  markRateLimited,
-  markValid,
-} from "./tokenManager.js";
+import { listTokens, markInvalid, markRateLimited, markValid } from "./tokenManager.js";
 import { FORGETMEAI_WATERMARK } from "../utils/branding.js";
 
 const router = express.Router();
@@ -31,7 +19,7 @@ router.get("/health", async (req, res) => {
     const tokens = listTokens();
     const now = Date.now();
     const availableAccounts = tokens.filter(
-      (t) => (!t.resetAt || new Date(t.resetAt).getTime() <= now) && !t.invalid,
+      (t) => (!t.resetAt || new Date(t.resetAt).getTime() <= now) && !t.invalid
     ).length;
 
     res.json({
@@ -44,9 +32,7 @@ router.get("/health", async (req, res) => {
         total: tokens.length,
         available: availableAccounts,
         invalid: tokens.filter((t) => t.invalid).length,
-        waiting: tokens.filter(
-          (t) => t.resetAt && new Date(t.resetAt).getTime() > now,
-        ).length,
+        waiting: tokens.filter((t) => t.resetAt && new Date(t.resetAt).getTime() > now).length,
       },
       timestamp: new Date().toISOString(),
     });
@@ -112,7 +98,7 @@ router.get("/status", async (req, res) => {
           accInfo.status = "ERROR";
         }
         return accInfo;
-      }),
+      })
     );
 
     const browserContext = getBrowserContext();
@@ -129,14 +115,10 @@ router.get("/status", async (req, res) => {
 
     await checkAuthentication(browserContext);
     const isAuthenticated = getAuthenticationStatus();
-    logInfo(
-      `Статус авторизации: ${isAuthenticated ? "активна" : "требуется авторизация"}`,
-    );
+    logInfo(`Статус авторизации: ${isAuthenticated ? "активна" : "требуется авторизация"}`);
     res.json({
       authenticated: isAuthenticated,
-      message: isAuthenticated
-        ? "Авторизация активна"
-        : "Требуется авторизация",
+      message: isAuthenticated ? "Авторизация активна" : "Требуется авторизация",
       accounts,
     });
   } catch (error) {
@@ -149,9 +131,7 @@ router.post("/chats", async (req, res) => {
   try {
     const { name, model } = req.body;
     const chatModel = model ? getMappedModel(model) : DEFAULT_MODEL;
-    logInfo(
-      `Создание нового чата${name ? ` с именем: ${name}` : ""}, модель: ${chatModel}`,
-    );
+    logInfo(`Создание нового чата${name ? ` с именем: ${name}` : ""}, модель: ${chatModel}`);
     const result = await createChatV2(chatModel, name || "Новый чат");
     if (result.error) {
       logError(`Ошибка создания чата: ${result.error}`);

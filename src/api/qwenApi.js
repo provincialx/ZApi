@@ -17,11 +17,7 @@ import {
 import { checkAuthentication, checkVerification } from "../browser/auth.js";
 import { shutdownBrowser, initBrowser } from "../browser/browser.js";
 import { saveAuthToken } from "../browser/session.js";
-import {
-  pagePool,
-  createPage,
-  evaluateWithTimeout,
-} from "../browser/pagePool.js";
+import { pagePool, createPage, evaluateWithTimeout } from "../browser/pagePool.js";
 import { getAvailableToken, markRateLimited } from "./tokenManager.js";
 import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
 import crypto from "crypto";
@@ -49,10 +45,9 @@ function validateAndPrepareMessage(message) {
       (item) =>
         (item.type === "text" && typeof item.text === "string") ||
         (item.type === "image" && typeof item.image === "string") ||
-        (item.type === "file" && typeof item.file === "string"),
+        (item.type === "file" && typeof item.file === "string")
     );
-    if (!isValid)
-      return { error: "Некорректная структура составного сообщения" };
+    if (!isValid) return { error: "Некорректная структура составного сообщения" };
     return { content: message };
   }
   return { error: "Неподдерживаемый формат сообщения" };
@@ -94,7 +89,7 @@ function buildPayloadV2(
   files,
   systemMessage,
   tools,
-  toolChoice,
+  toolChoice
 ) {
   const userMessageId = crypto.randomUUID();
   const assistantChildId = crypto.randomUUID();
@@ -156,7 +151,7 @@ function buildPayloadV2(
   if (systemMessage) {
     payload.system_message = systemMessage;
     logDebug(
-      `System message: ${systemMessage.substring(0, 100)}${systemMessage.length > 100 ? "..." : ""}`,
+      `System message: ${systemMessage.substring(0, 100)}${systemMessage.length > 100 ? "..." : ""}`
     );
   }
   // Tool prompt injected in routes.js into both user message content AND system_message.
@@ -178,8 +173,7 @@ function parseNonSseCompletionBody(body) {
       Boolean(nestedCode);
 
     if (hasStructuredError) {
-      const isRateLimited =
-        topLevelCode === "RateLimited" || nestedCode === "RateLimited";
+      const isRateLimited = topLevelCode === "RateLimited" || nestedCode === "RateLimited";
       return {
         success: false,
         status: isRateLimited ? 429 : 500,
@@ -187,11 +181,7 @@ function parseNonSseCompletionBody(body) {
       };
     }
 
-    if (
-      parsed.choices ||
-      parsed.id ||
-      (parsed.success === true && parsed.data)
-    ) {
+    if (parsed.choices || parsed.id || (parsed.success === true && parsed.data)) {
       return { success: true, isTask: false, data: parsed };
     }
   } catch {
@@ -205,16 +195,10 @@ function parseNonSseCompletionBody(body) {
   };
 }
 
-async function executeApiRequestWithNodeStreaming(
-  apiUrl,
-  payload,
-  token,
-  onChunk,
-) {
+async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChunk) {
   try {
     if (!token) return { success: false, error: "Токен авторизации не найден" };
-    if (typeof fetch !== "function")
-      return { success: false, error: "Fetch API is unavailable" };
+    if (typeof fetch !== "function") return { success: false, error: "Fetch API is unavailable" };
 
     const response = await fetch(apiUrl, {
       method: "POST",
@@ -302,8 +286,7 @@ async function executeApiRequestWithNodeStreaming(
             break;
           }
 
-          if (chunk["response.created"])
-            responseId = chunk["response.created"].response_id;
+          if (chunk["response.created"]) responseId = chunk["response.created"].response_id;
           if (chunk.response_id) responseId = chunk.response_id;
 
           if (chunk.choices && chunk.choices[0]) {
@@ -365,7 +348,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
       apiUrl,
       payload,
       token,
-      onChunk,
+      onChunk
     );
 
     const canReturnDirectly =
@@ -379,15 +362,13 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
     }
 
     logWarn(
-      `Node-streaming недоступен (${streamedResponse.error || "unknown error"}), fallback к browser fetch.`,
+      `Node-streaming недоступен (${streamedResponse.error || "unknown error"}), fallback к browser fetch.`
     );
   }
 
   const requestBody = { apiUrl, payload, token };
 
-  logDebug(
-    `Используем токен: ${token ? "Токен существует" : "Токен отсутствует"}`,
-  );
+  logDebug(`Используем токен: ${token ? "Токен существует" : "Токен отсутствует"}`);
   logDebug(`API URL: ${apiUrl}`);
 
   return page.evaluate(async (data) => {
@@ -435,8 +416,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
 
             // API иногда возвращает JSON с success=false и code при HTTP 200.
             if (hasStructuredError) {
-              const isRateLimited =
-                topLevelCode === "RateLimited" || nestedCode === "RateLimited";
+              const isRateLimited = topLevelCode === "RateLimited" || nestedCode === "RateLimited";
               return {
                 success: false,
                 status: isRateLimited ? 429 : 500,
@@ -444,11 +424,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
               };
             }
             // Валидный JSON-ответ completion (иногда Qwen возвращает так)
-            if (
-              parsed.choices ||
-              parsed.id ||
-              (parsed.success === true && parsed.data)
-            ) {
+            if (parsed.choices || parsed.id || (parsed.success === true && parsed.data)) {
               return { success: true, isTask: false, data: parsed };
             }
           } catch {
@@ -484,10 +460,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
             try {
               const chunk = JSON.parse(jsonStr);
 
-              if (
-                chunk.code === "RateLimited" ||
-                (chunk.code && chunk.detail)
-              ) {
+              if (chunk.code === "RateLimited" || (chunk.code && chunk.detail)) {
                 streamError = { status: 429, errorBody: JSON.stringify(chunk) };
                 finished = true;
                 break;
@@ -498,8 +471,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
                 break;
               }
 
-              if (chunk["response.created"])
-                responseId = chunk["response.created"].response_id;
+              if (chunk["response.created"]) responseId = chunk["response.created"].response_id;
               if (chunk.choices && chunk.choices[0]) {
                 const delta = chunk.choices[0].delta;
                 if (delta && delta.content) fullContent += delta.content;
@@ -563,7 +535,7 @@ async function handleApiError(
   parentId,
   files,
   retryCount,
-  onChunk = null,
+  onChunk = null
 ) {
   // Build error message — caller is responsible for logging.
   // Don't log here: "in progress", "not exist" etc. are transient and
@@ -572,22 +544,13 @@ async function handleApiError(
     response.error ||
     response.statusText ||
     (response.status ? `HTTP ${response.status}` : "Неизвестная ошибка");
-  if (
-    !response.error &&
-    !response.statusText &&
-    !response.status &&
-    !response.errorBody
-  ) {
-    logWarn(
-      `handleApiError получил неполный объект: ключи=${Object.keys(response).join(",")}`,
-    );
+  if (!response.error && !response.statusText && !response.status && !response.errorBody) {
+    logWarn(`handleApiError получил неполный объект: ключи=${Object.keys(response).join(",")}`);
   }
 
   if (response.html && response.html.includes("Verification")) {
     setAuthenticationStatus(false);
-    logInfo(
-      "Обнаружена необходимость верификации, перезапуск браузера в видимом режиме...",
-    );
+    logInfo("Обнаружена необходимость верификации, перезапуск браузера в видимом режиме...");
     await pagePool.clear();
     setAuthToken(null);
     await shutdownBrowser();
@@ -605,9 +568,7 @@ async function handleApiError(
       (response.errorBody.includes("Unauthorized") ||
         response.errorBody.includes("Token has expired")))
   ) {
-    logWarn(
-      `Токен ${tokenObj?.id} недействителен (401). Удаляем и пробуем другой.`,
-    );
+    logWarn(`Токен ${tokenObj?.id} недействителен (401). Удаляем и пробуем другой.`);
     setAuthToken(null);
     setBrowserTokenRateLimited(false);
     if (tokenObj?.id && tokenObj.id !== "browser") {
@@ -626,13 +587,12 @@ async function handleApiError(
         null, // toolChoice
         null, // systemMessage (cleared on retry — Qwen stores it)
         retryCount + 1,
-        onChunk,
+        onChunk
       );
     }
     logError("Не осталось валидных токенов или исчерпаны попытки.");
     return {
-      error:
-        "Все токены недействительны (401). Требуется повторная авторизация.",
+      error: "Все токены недействительны (401). Требуется повторная авторизация.",
       chatId,
     };
   }
@@ -655,7 +615,7 @@ async function handleApiError(
     } else if (tokenObj?.id) {
       markRateLimited(tokenObj.id, hours);
       logWarn(
-        `Токен ${tokenObj.id} достиг лимита. Помечаем на ${hours}ч и пробуем другой токен...`,
+        `Токен ${tokenObj.id} достиг лимита. Помечаем на ${hours}ч и пробуем другой токен...`
       );
     }
 
@@ -672,7 +632,7 @@ async function handleApiError(
         null, // toolChoice
         null, // systemMessage
         retryCount + 1,
-        onChunk,
+        onChunk
       );
     }
     return { error: `Все токены заблокированы по лимиту (${hours}ч)`, chatId };
@@ -701,12 +661,11 @@ export async function sendMessage(
   toolChoice = null,
   systemMessage = null,
   retryCount = 0,
-  onChunk = null,
+  onChunk = null
 ) {
   if (!chatId) {
     const newChatResult = await createChatV2(model, "Новый чат", 0);
-    if (newChatResult.error)
-      return { error: "Не удалось создать чат: " + newChatResult.error };
+    if (newChatResult.error) return { error: "Не удалось создать чат: " + newChatResult.error };
     chatId = newChatResult.chatId;
     logInfo(`Создан новый чат v2 с ID: ${chatId}`);
   }
@@ -721,9 +680,7 @@ export async function sendMessage(
   if (!model || model.trim() === "") {
     model = DEFAULT_MODEL;
   } else if (!isValidModel(model)) {
-    logWarn(
-      `Модель "${model}" не найдена в списке доступных. Используется модель по умолчанию.`,
-    );
+    logWarn(`Модель "${model}" не найдена в списке доступных. Используется модель по умолчанию.`);
     model = DEFAULT_MODEL;
   }
   logInfo(`Используемая модель: "${model}"`);
@@ -732,8 +689,7 @@ export async function sendMessage(
   if (!browserContext) return { error: "Браузер не инициализирован", chatId };
 
   const tokenObj = await resolveAuthToken(browserContext);
-  if (!tokenObj)
-    return { error: "Ошибка авторизации: не удалось получить токен", chatId };
+  if (!tokenObj) return { error: "Ошибка авторизации: не удалось получить токен", chatId };
 
   let page = null;
   try {
@@ -752,8 +708,7 @@ export async function sendMessage(
       setAuthToken(await page.evaluate(() => localStorage.getItem("token")));
       if (!getAuthToken())
         return {
-          error:
-            "Токен авторизации не найден. Требуется перезапуск в ручном режиме.",
+          error: "Токен авторизации не найден. Требуется перезапуск в ручном режиме.",
           chatId,
         };
       saveAuthToken(getAuthToken());
@@ -769,25 +724,15 @@ export async function sendMessage(
       files,
       systemMessage,
       tools,
-      toolChoice,
+      toolChoice
     );
-    logDebug(
-      `Отправка запроса к API v2 (model: ${payload.model}, chat_id: ${payload.chat_id})`,
-    );
+    logDebug(`Отправка запроса к API v2 (model: ${payload.model}, chat_id: ${payload.chat_id})`);
     // Full debug: enable for tool-calling troubleshooting only!
     // logDebug("=== PAYLOAD V2 ===\n" + JSON.stringify(payload, null, 2));
-    logInfo(
-      `Отправка сообщения в чат ${chatId} с parent_id: ${parentId || "null"}`,
-    );
+    logInfo(`Отправка сообщения в чат ${chatId} с parent_id: ${parentId || "null"}`);
 
     const apiUrl = `${CHAT_API_URL}?chat_id=${chatId}`;
-    const response = await executeApiRequest(
-      page,
-      apiUrl,
-      payload,
-      getAuthToken(),
-      onChunk,
-    );
+    const response = await executeApiRequest(page, apiUrl, payload, getAuthToken(), onChunk);
 
     pagePool.releasePage(page);
     page = null;
@@ -799,10 +744,7 @@ export async function sendMessage(
       response.data.id = response.data.id || "chatcmpl-" + Date.now();
 
       // Fallback: если поток чанков не был отдан, отправляем контент единым куском.
-      if (
-        typeof onChunk === "function" &&
-        response.data.choices?.[0]?.message?.content
-      ) {
+      if (typeof onChunk === "function" && response.data.choices?.[0]?.message?.content) {
         onChunk(response.data.choices[0].message.content);
       }
       return response.data;
@@ -816,7 +758,7 @@ export async function sendMessage(
         parentId,
         files,
         retryCount,
-        onChunk,
+        onChunk
       );
 
       // Distinguish between parent_id not exist and chat not exist.
@@ -827,9 +769,7 @@ export async function sendMessage(
         /not exist/i.test(response.errorBody) &&
         /parent_id/i.test(response.errorBody)
       ) {
-        logWarn(
-          `Stale parentId ${parentId} — retry without it on chat ${chatId}`,
-        );
+        logWarn(`Stale parentId ${parentId} — retry without it on chat ${chatId}`);
         if (retryCount < 1) {
           const retryResult = await sendMessage(
             message,
@@ -841,16 +781,14 @@ export async function sendMessage(
             toolChoice,
             systemMessage,
             retryCount + 1,
-            onChunk,
+            onChunk
           );
           return retryResult;
         }
       }
 
       if (response.errorBody && /not exist/i.test(response.errorBody)) {
-        logWarn(
-          `Qwen чат ${chatId} больше не существует. Создаю новый и повторяю запрос...`,
-        );
+        logWarn(`Qwen чат ${chatId} больше не существует. Создаю новый и повторяю запрос...`);
         const newChatResult = await createChatV2(model, "Сессия", 0);
         if (newChatResult && newChatResult.chatId) {
           // Retry with new chat. Reset parentId — old parent message doesn't exist in the new chat.
@@ -864,7 +802,7 @@ export async function sendMessage(
             toolChoice,
             systemMessage,
             1, // prevent infinite retry loop
-            onChunk,
+            onChunk
           );
           // Signal to routes: this request used a newly-created chat
           if (!retryResult.error) {
@@ -875,12 +813,9 @@ export async function sendMessage(
       }
 
       // Handle Qwen API error: "The chat is in progress!" -> create new chat and retry once
-      if (
-        response.errorBody &&
-        /chat is in progress/i.test(response.errorBody)
-      ) {
+      if (response.errorBody && /chat is in progress/i.test(response.errorBody)) {
         logWarn(
-          `Qwen чат ${chatId} заблокирован ("in progress"). Создаю новый и повторяю запрос...`,
+          `Qwen чат ${chatId} заблокирован ("in progress"). Создаю новый и повторяю запрос...`
         );
         const newChatResult = await createChatV2(model, "Сессия", 0);
         if (newChatResult && newChatResult.chatId) {
@@ -895,7 +830,7 @@ export async function sendMessage(
             toolChoice,
             systemMessage,
             1,
-            onChunk,
+            onChunk
           );
           if (!retryResult.error) retryResult.newChatId = newChatResult.chatId;
           return retryResult;
@@ -903,11 +838,8 @@ export async function sendMessage(
       }
 
       // All transient retries exhausted — log final error.
-      logError(
-        `Ошибка API для чата ${chatId}: ${apiResult.error || "неизвестно"}`,
-      );
-      if (response.errorBody)
-        logWarn(`Ошибка API ответ: ${response.errorBody.substring(0, 500)}`);
+      logError(`Ошибка API для чата ${chatId}: ${apiResult.error || "неизвестно"}`);
+      if (response.errorBody) logWarn(`Ошибка API ответ: ${response.errorBody.substring(0, 500)}`);
       return apiResult;
     }
   } catch (error) {
@@ -922,11 +854,7 @@ export async function sendMessage(
 
 // ─── createChatV2 ────────────────────────────────────────────────────────────
 
-export async function createChatV2(
-  model = DEFAULT_MODEL,
-  title = "Новый чат",
-  retryCount = 0,
-) {
+export async function createChatV2(model = DEFAULT_MODEL, title = "Новый чат", retryCount = 0) {
   const browserContext = getBrowserContext();
   if (!browserContext) return { error: "Браузер не инициализирован" };
 
@@ -939,8 +867,7 @@ export async function createChatV2(
   if (!getAuthToken()) {
     logInfo("Получение токена авторизации для создания чата...");
     setAuthToken(await extractAuthToken(browserContext));
-    if (!getAuthToken())
-      return { error: "Не удалось получить токен авторизации" };
+    if (!getAuthToken()) return { error: "Не удалось получить токен авторизации" };
   }
 
   let page = null;
@@ -996,7 +923,7 @@ export async function createChatV2(
     const isTransient = result.status >= 500 && result.status < 600;
     if (isTransient && retryCount < MAX_RETRY_COUNT) {
       logWarn(
-        `Создание чата: ${result.status}, ретрай ${retryCount + 1}/${MAX_RETRY_COUNT} через ${RETRY_DELAY}мс...`,
+        `Создание чата: ${result.status}, ретрай ${retryCount + 1}/${MAX_RETRY_COUNT} через ${RETRY_DELAY}мс...`
       );
       await delay(RETRY_DELAY);
       return createChatV2(model, title, retryCount + 1);
@@ -1005,9 +932,7 @@ export async function createChatV2(
     const cleanError = isTransient
       ? `Qwen API недоступен (${result.status}). Повторите позже.`
       : result.errorBody || result.error || "Неизвестная ошибка";
-    logError(
-      `Ошибка при создании чата: ${result.status || "unknown"} (попытка ${retryCount + 1})`,
-    );
+    logError(`Ошибка при создании чата: ${result.status || "unknown"} (попытка ${retryCount + 1})`);
     return { error: cleanError };
   } catch (error) {
     logError("Ошибка при создании чата", error);
@@ -1070,7 +995,9 @@ export async function testToken(token) {
     if (page) {
       try {
         if (shouldClosePage) await page.close();
-      } catch {}
+      } catch {
+        // Page close failure is non-critical during shutdown
+      }
     }
   }
 }

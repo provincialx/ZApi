@@ -16,9 +16,7 @@ export function getIdempotencyKey(messages, chatId) {
   if (typeof lastUser.content === "string") {
     contentStr = lastUser.content.substring(0, 200);
   } else if (Array.isArray(lastUser.content)) {
-    const texts = lastUser.content
-      .filter((x) => x.type === "text")
-      .map((x) => x.text || "");
+    const texts = lastUser.content.filter((x) => x.type === "text").map((x) => x.text || "");
     contentStr = texts.join("").substring(0, 200);
   }
   if (!contentStr) return null;
@@ -65,26 +63,19 @@ export function generateChatIdFromHistory(messages) {
   const userMessages = messagesToUse
     .filter((m) => m.role === "user")
     .slice(0, 1)
-    .map((m) =>
-      typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-    )
+    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
     .join("||");
 
   if (!userMessages) return null;
 
-  const hash = crypto
-    .createHash("sha256")
-    .update(userMessages)
-    .digest("hex")
-    .substring(0, 16);
+  const hash = crypto.createHash("sha256").update(userMessages).digest("hex").substring(0, 16);
 
   return `chat_${hash}`;
 }
 
 export function normalizeIdValue(value) {
   if (value === null || value === undefined) return null;
-  if (typeof value === "number" || typeof value === "bigint")
-    return String(value);
+  if (typeof value === "number" || typeof value === "bigint") return String(value);
   if (typeof value !== "string") return null;
 
   const trimmed = value.trim();
@@ -119,8 +110,7 @@ export function buildInternalChatIdFromHint(hint) {
 
 export function extractConversationHint(req) {
   const body = req.body || {};
-  const metadata =
-    body && typeof body.metadata === "object" ? body.metadata : {};
+  const metadata = body && typeof body.metadata === "object" ? body.metadata : {};
 
   return pickFirstId([
     body.conversation_id,
@@ -139,8 +129,7 @@ export function extractConversationHint(req) {
 
 export function extractParentHint(req) {
   const body = req.body || {};
-  const metadata =
-    body && typeof body.metadata === "object" ? body.metadata : {};
+  const metadata = body && typeof body.metadata === "object" ? body.metadata : {};
 
   return pickFirstId([
     body.parentId,
@@ -189,8 +178,7 @@ const modelDefaultChats = new Map();
  * Accumulated tool context makes qwen3.7-max answer text instead of JSON.
  * Config: TOOL_CALL_RESET_THRESHOLD (default: 8)
  */
-export const TOOL_CALL_RESET_THRESHOLD =
-  Number(process.env.TOOL_CALL_RESET_THRESHOLD) || 8;
+export const TOOL_CALL_RESET_THRESHOLD = Number(process.env.TOOL_CALL_RESET_THRESHOLD) || 8;
 
 // Tracks models invalidated by auto-reset. Force Folding applied on NEXT request.
 const forceResetModels = new Set();
@@ -217,7 +205,7 @@ export function applyForceFolding(messages, mappedModel) {
       (head.length + tail.length) +
       " msgs. " +
       discarded.length +
-      " turns compressed",
+      " turns compressed"
   );
   forceResetModels.delete(mappedModel);
   return [...systemMsgs, ...head, toolSummary, ...tail];
@@ -332,8 +320,7 @@ function isOpenWebUiMetaRequest(messages) {
   if (text.startsWith("### Task:")) return true;
   if (text.startsWith("History:")) return true;
 
-  if (text.includes("<chat_history>") && text.includes("### Task:"))
-    return true;
+  if (text.includes("<chat_history>") && text.includes("### Task:")) return true;
 
   return false;
 }
@@ -347,9 +334,7 @@ export async function resolveQwenChatId(effectiveChatId, mappedModel) {
 
   if (mapped) {
     qwenChatId = mapped;
-    logInfo(
-      `🔁 Используется сопоставленный Qwen chatId: ${qwenChatId} (from ${effectiveChatId})`,
-    );
+    logInfo(`🔁 Используется сопоставленный Qwen chatId: ${qwenChatId} (from ${effectiveChatId})`);
     return qwenChatId;
   }
 
@@ -357,9 +342,7 @@ export async function resolveQwenChatId(effectiveChatId, mappedModel) {
   if (!qwenChatId || effectiveChatId?.startsWith("chat_")) {
     const defaultForModel = getOrCreateModelDefaultChat(mappedModel);
     if (defaultForModel) {
-      logInfo(
-        `♻️ Дефолтный Qwen чат для ${mappedModel}: ${defaultForModel.chatId}`,
-      );
+      logInfo(`♻️ Дефолтный Qwen чат для ${mappedModel}: ${defaultForModel.chatId}`);
       qwenChatId = defaultForModel.chatId;
 
       if (effectiveChatId && effectiveChatId.startsWith("chat_")) {
@@ -378,14 +361,10 @@ export async function resolveQwenChatId(effectiveChatId, mappedModel) {
 
         saveModelDefaultChat(mappedModel, qwenChatId, null);
 
-        logInfo(
-          `🔨 Создан Qwen chat ${qwenChatId} и привязан к ${effectiveChatId}`,
-        );
+        logInfo(`🔨 Создан Qwen chat ${qwenChatId} и привязан к ${effectiveChatId}`);
       }
     } catch (error) {
-      logDebug(
-        `Не удалось создать Qwen chat для ${effectiveChatId}: ${error.message}`,
-      );
+      logDebug(`Не удалось создать Qwen chat для ${effectiveChatId}: ${error.message}`);
     }
   }
 
@@ -400,10 +379,7 @@ const sessionToChatMap = new Map();
 function getSessionKey(req) {
   const ip = req.ip || req.connection.remoteAddress || "unknown";
   const userAgent = req.get("user-agent") || "unknown";
-  return crypto
-    .createHash("sha256")
-    .update(`${ip}||${userAgent}`)
-    .digest("hex");
+  return crypto.createHash("sha256").update(`${ip}||${userAgent}`).digest("hex");
 }
 
 function getScopedSessionKey(req, scope = null) {
@@ -437,9 +413,7 @@ export function saveChatIdForSession(req, chatId, parentId, scope = null) {
   });
 
   const scopeSuffix = normalizedScope ? ` (scope=${normalizedScope})` : "";
-  logDebug(
-    `Saved chatId ${chatId} for session ${sessionKey.substring(0, 8)}${scopeSuffix}`,
-  );
+  logDebug(`Saved chatId ${chatId} for session ${sessionKey.substring(0, 8)}${scopeSuffix}`);
 }
 
 // ─── Chat ID Map Access ───────────────────────────────────────────────────────
@@ -466,30 +440,21 @@ export function persistSessionState(
   conversationScope,
   mappedModel,
   req,
-  effectiveParentId,
+  effectiveParentId
 ) {
   const resolvedChatId = result.chatId || qwenChatId;
 
   if (isMeta || !resolvedChatId) return;
 
   // Map generated export ID → Qwen internal ID
-  if (
-    effectiveChatId &&
-    effectiveChatId.startsWith("chat_") &&
-    resolvedChatId
-  ) {
+  if (effectiveChatId && effectiveChatId.startsWith("chat_") && resolvedChatId) {
     mapChatIdExport(effectiveChatId, resolvedChatId);
     logDebug(`Маппинг сохранён: ${effectiveChatId} -> ${resolvedChatId}`);
   }
 
   // Persist to scoped session storage
   if (shouldPersistSessionContext(conversationScope)) {
-    saveChatIdForSession(
-      req,
-      resolvedChatId,
-      result.parentId,
-      conversationScope,
-    );
+    saveChatIdForSession(req, resolvedChatId, result.parentId, conversationScope);
   }
 
   // Update model default chat — next request without chatId reuses it
@@ -506,21 +471,15 @@ export function persistSessionState(
         existing?.inAgentLoop ||
         (result.choices?.[0]?.message?.content || "").includes("tool_calls");
       if (inLoop) {
-        logInfo(
-          `♻️ Retry-newChatId during active loop — skipping invalidation for ${mappedModel}`,
-        );
+        logInfo(`♻️ Retry-newChatId during active loop — skipping invalidation for ${mappedModel}`);
       } else {
         invalidateModelDefaultChat(mappedModel);
       }
     }
-    saveModelDefaultChat(
-      mappedModel,
-      resolvedChatId,
-      result.parentId || effectiveParentId,
-    );
+    saveModelDefaultChat(mappedModel, resolvedChatId, result.parentId || effectiveParentId);
     if (result.newChatId) {
       logInfo(
-        `♻️ Обновлён default-чат после создания нового: ${resolvedChatId} для ${mappedModel}`,
+        `♻️ Обновлён default-чат после создания нового: ${resolvedChatId} для ${mappedModel}`
       );
     } else {
       logDebug(`Обновлён parentId в default-чате: ${result.parentId}`);

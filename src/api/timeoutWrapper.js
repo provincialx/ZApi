@@ -11,7 +11,7 @@ export function withRequestTimeout(promise, label = "request") {
   const abortPromise = new Promise((_, reject) => {
     abortTimer = setTimeout(
       () => reject(new Error(`⏱ Timeout after ${REQUEST_TIMEOUT_MINUTES}m (${label})`)),
-      ms,
+      ms
     );
   });
 

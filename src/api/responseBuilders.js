@@ -4,12 +4,7 @@ import { sendMessage } from "./chat.js";
 
 // ─── OpenAI Tool Response Builder ─────────────────────────────────────────────
 
-export function buildOpenAIToolResponse(
-  result,
-  mappedModel,
-  toolCalls,
-  visibleText,
-) {
+export function buildOpenAIToolResponse(result, mappedModel, toolCalls, visibleText) {
   return {
     id: result.id || "chatcmpl-" + Date.now(),
     object: "chat.completion",
@@ -20,8 +15,7 @@ export function buildOpenAIToolResponse(
         index: 0,
         message: {
           role: "assistant",
-          content:
-            visibleText && visibleText.trim() ? visibleText.trim() : null,
+          content: visibleText && visibleText.trim() ? visibleText.trim() : null,
           tool_calls: toolCalls.map(({ index, ...call }) => call),
         },
         finish_reason: "tool_calls",
@@ -41,13 +35,7 @@ export function buildOpenAIToolResponse(
 
 // ─── SSE Helpers ──────────────────────────────────────────────────────────────
 
-export function writeToolCallsSse(
-  res,
-  mappedModel,
-  result,
-  toolCalls,
-  visibleText,
-) {
+export function writeToolCallsSse(res, mappedModel, result, toolCalls, visibleText) {
   const base = {
     id: result.id || "chatcmpl-stream",
     object: "chat.completion.chunk",
@@ -60,11 +48,9 @@ export function writeToolCallsSse(
     "data: " +
       JSON.stringify({
         ...base,
-        choices: [
-          { index: 0, delta: { role: "assistant" }, finish_reason: null },
-        ],
+        choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
       }) +
-      "\n\n",
+      "\n\n"
   );
 
   // Reasoning/visible text chunk — sent BEFORE tool_calls so Zed gets context
@@ -114,7 +100,7 @@ export function writeToolCallsSse(
             },
           ],
         }) +
-        "\n\n",
+        "\n\n"
     );
 
     // Chunks 2+: arguments delivered in segments (max ~500 chars per chunk)
@@ -122,7 +108,7 @@ export function writeToolCallsSse(
     const argChunks = Math.ceil(args.length / ARG_CHUNK);
     if (argChunks > 1) {
       logDebug(
-        `🔨 Splitting ${args.length} args into ${argChunks} chunks for tool_call index=${call.index}`,
+        `🔨 Splitting ${args.length} args into ${argChunks} chunks for tool_call index=${call.index}`
       );
     }
 
@@ -146,7 +132,7 @@ export function writeToolCallsSse(
               },
             ],
           }) +
-          "\n\n",
+          "\n\n"
       );
     }
   }
@@ -156,7 +142,7 @@ export function writeToolCallsSse(
         ...base,
         choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
       }) +
-      "\n\n",
+      "\n\n"
   );
   res.write("data: [DONE]\n\n");
   res.end();
@@ -172,14 +158,13 @@ export async function handleStreamingResponse(
   parentId,
   combinedTools,
   toolChoice,
-  systemMessage,
+  systemMessage
 ) {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
 
-  const writeSse = (payload) =>
-    res.write("data: " + JSON.stringify(payload) + "\n\n");
+  const writeSse = (payload) => res.write("data: " + JSON.stringify(payload) + "\n\n");
 
   writeSse({
     id: "chatcmpl-stream",
@@ -198,7 +183,7 @@ export async function handleStreamingResponse(
       null,
       combinedTools,
       toolChoice,
-      systemMessage,
+      systemMessage
     );
 
     if (result.error) {

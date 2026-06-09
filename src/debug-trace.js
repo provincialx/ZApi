@@ -21,11 +21,11 @@ export function requestTracer() {
 
       if (typeof body === "object" && body !== null) {
         const hasError = !!body.error;
-        const hasChoices = !!(body.choices?.length);
+        const hasChoices = !!body.choices?.length;
         const contentLen = body.choices?.[0]?.message?.content?.length || 0;
 
         logInfo(
-          `◀ [TRACE] ${status} in ${elapsed}ms | error=${hasError} choices=${hasChoices ? `[${body.choices.length}]` : "none"} content_len=${contentLen}`,
+          `◀ [TRACE] ${status} in ${elapsed}ms | error=${hasError} choices=${hasChoices ? `[${body.choices.length}]` : "none"} content_len=${contentLen}`
         );
 
         if (hasError) {

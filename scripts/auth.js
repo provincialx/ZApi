@@ -40,7 +40,7 @@ function printAccounts(tokens) {
   tokens.forEach((token, index) => {
     const status = formatStatus(token);
     console.log(
-      `${String(index + 1).padStart(2, " ")} | ${token.id} | ${status.label} (${status.code})`,
+      `${String(index + 1).padStart(2, " ")} | ${token.id} | ${status.label} (${status.code})`
     );
   });
 }

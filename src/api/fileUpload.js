@@ -28,9 +28,7 @@ async function validateAuthToken(browserContext) {
 
   let token = getAuthToken();
   if (!token) {
-    logInfo(
-      "Токен авторизации не найден в памяти, пытаемся извлечь из браузера",
-    );
+    logInfo("Токен авторизации не найден в памяти, пытаемся извлечь из браузера");
     token = await extractAuthToken(browserContext);
     if (!token) throw new Error("Не удалось получить токен авторизации");
   }
@@ -57,8 +55,7 @@ export async function getStsToken(fileInfo) {
             },
             body: JSON.stringify(data.fileInfo),
           });
-          if (response.ok)
-            return { success: true, data: await response.json() };
+          if (response.ok) return { success: true, data: await response.json() };
           return {
             success: false,
             status: response.status,
@@ -69,7 +66,7 @@ export async function getStsToken(fileInfo) {
           return { success: false, error: error.toString() };
         }
       },
-      { apiUrl: STS_TOKEN_API_URL, token, fileInfo },
+      { apiUrl: STS_TOKEN_API_URL, token, fileInfo }
     );
 
     if (result.success) {
@@ -77,11 +74,9 @@ export async function getStsToken(fileInfo) {
       return result.data;
     }
     logError(
-      `Ошибка при получении STS токена: status=${result.status}, error=${result.errorBody || result.error}`,
+      `Ошибка при получении STS токена: status=${result.status}, error=${result.errorBody || result.error}`
     );
-    throw new Error(
-      `Ошибка получения STS токена: ${result.statusText || result.error}`,
-    );
+    throw new Error(`Ошибка получения STS токена: ${result.statusText || result.error}`);
   } catch (error) {
     logError(`Ошибка при получении STS токена: ${error.message}`, error);
     throw error;
@@ -134,9 +129,7 @@ export async function uploadFile(filePath, stsData) {
               document.head.appendChild(script);
             });
           }
-          const blob = new Blob([
-            Uint8Array.from(atob(data.fileBase64), (c) => c.charCodeAt(0)),
-          ]);
+          const blob = new Blob([Uint8Array.from(atob(data.fileBase64), (c) => c.charCodeAt(0))]);
           const client = new window.OSS({
             region: data.stsData.region,
             accessKeyId: data.stsData.access_key_id,
@@ -162,7 +155,7 @@ export async function uploadFile(filePath, stsData) {
           access_key_secret: stsData.access_key_secret,
           security_token: stsData.security_token,
         },
-      },
+      }
     );
 
     if (result.success) {
@@ -192,8 +185,7 @@ export async function uploadFile(filePath, stsData) {
 
 export async function uploadFileToQwen(filePath) {
   try {
-    if (!fs.existsSync(filePath))
-      throw new Error(`Файл не найден: ${filePath}`);
+    if (!fs.existsSync(filePath)) throw new Error(`Файл не найден: ${filePath}`);
 
     const fileName = path.basename(filePath);
     const fileSize = fs.statSync(filePath).size;
@@ -201,8 +193,7 @@ export async function uploadFileToQwen(filePath) {
 
     let fileType = DEFAULT_FILE_TYPE;
     if (IMAGE_EXTENSIONS.includes(fileExt)) fileType = IMAGE_FILE_TYPE;
-    else if (DOCUMENT_EXTENSIONS.includes(fileExt))
-      fileType = DOCUMENT_FILE_TYPE;
+    else if (DOCUMENT_EXTENSIONS.includes(fileExt)) fileType = DOCUMENT_FILE_TYPE;
 
     const fileInfo = {
       filename: fileName,

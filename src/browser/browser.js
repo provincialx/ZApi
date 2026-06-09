@@ -26,10 +26,7 @@ export let isAuthenticated = false;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function initBrowser(
-  visibleMode = true,
-  skipManualRestart = false,
-) {
+export async function initBrowser(visibleMode = true, skipManualRestart = false) {
   if (browserInstance) return true;
 
   logInfo("Инициализация браузера с Puppeteer Stealth...");
@@ -116,25 +113,12 @@ export async function initBrowser(
       }
 
       const originalAddEventListener = EventTarget.prototype.addEventListener;
-      EventTarget.prototype.addEventListener = function (
-        type,
-        listener,
-        options,
-      ) {
-        if (
-          type === "mousemove" ||
-          type === "mousedown" ||
-          type === "mouseup"
-        ) {
+      EventTarget.prototype.addEventListener = function (type, listener, options) {
+        if (type === "mousemove" || type === "mousedown" || type === "mouseup") {
           const wrappedListener = function (event) {
             setTimeout(() => listener.call(this, event), Math.random() * 3);
           };
-          return originalAddEventListener.call(
-            this,
-            type,
-            wrappedListener,
-            options,
-          );
+          return originalAddEventListener.call(this, type, wrappedListener, options);
         }
         return originalAddEventListener.call(this, type, listener, options);
       };
@@ -176,18 +160,13 @@ async function saveSessionPuppeteer(page) {
   try {
     const cookies = await page.cookies();
     const sessionDir = path.join(process.cwd(), SESSION_DIR, ACCOUNTS_DIR);
-    if (!fs.existsSync(sessionDir))
-      fs.mkdirSync(sessionDir, { recursive: true });
+    if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
     const accountId = `acc_${Date.now()}`;
     const accountDir = path.join(sessionDir, accountId);
-    if (!fs.existsSync(accountDir))
-      fs.mkdirSync(accountDir, { recursive: true });
+    if (!fs.existsSync(accountDir)) fs.mkdirSync(accountDir, { recursive: true });
 
-    fs.writeFileSync(
-      path.join(accountDir, "cookies.json"),
-      JSON.stringify(cookies, null, 2),
-    );
+    fs.writeFileSync(path.join(accountDir, "cookies.json"), JSON.stringify(cookies, null, 2));
     logInfo(`Cookies сохранены для аккаунта ${accountId}`);
     return accountId;
   } catch (error) {
@@ -242,7 +221,7 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
         localStorage.getItem("access_token") ||
         sessionStorage.getItem("token") ||
         sessionStorage.getItem("auth_token") ||
-        null,
+        null
     );
 
     if (token) {
@@ -252,9 +231,7 @@ async function startManualAuthenticationPuppeteer(page, skipManualRestart) {
       logWarn("Токен не найден в localStorage/sessionStorage");
       logInfo("Попытка извлечь токен из cookies...");
       const tokenCookie = cookies.find(
-        (c) =>
-          c.name.toLowerCase().includes("token") ||
-          c.name.toLowerCase().includes("auth"),
+        (c) => c.name.toLowerCase().includes("token") || c.name.toLowerCase().includes("auth")
       );
       if (tokenCookie) {
         logInfo(`Токен найден в cookie: ${tokenCookie.name}`);
@@ -286,11 +263,7 @@ export async function restartBrowserInHeadlessMode() {
   await shutdownBrowser();
   await delay(RETRY_DELAY);
   const success = await initBrowser(false);
-  logInfo(
-    success
-      ? "Браузер перезапущен в фоновом режиме"
-      : "Ошибка при перезапуске браузера",
-  );
+  logInfo(success ? "Браузер перезапущен в фоновом режиме" : "Ошибка при перезапуске браузера");
 }
 
 export async function shutdownBrowser() {

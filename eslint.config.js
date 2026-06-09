@@ -22,6 +22,7 @@ export default [
     },
     rules: {
       "no-unused-vars": ["warn", { argsIgnorePattern: "^_", caughtErrors: "none" }],
+      "no-empty": "warn",
       "no-unreachable": "warn",
       "no-await-in-loop": "off",
       "no-prototype-builtins": "off",

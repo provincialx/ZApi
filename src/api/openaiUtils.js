@@ -33,10 +33,7 @@ export function parseOpenAIMessages(messages) {
 
 export function buildCombinedTools(tools, functions, toolChoice) {
   const combinedTools =
-    tools ||
-    (functions
-      ? functions.map((fn) => ({ type: "function", function: fn }))
-      : null);
+    tools || (functions ? functions.map((fn) => ({ type: "function", function: fn })) : null);
   return { combinedTools, toolChoice };
 }
 
@@ -51,11 +48,9 @@ export function stringifyOpenAIContent(content) {
         if (!item) return "";
         if (typeof item === "string") return item;
         if (item.type === "text") return item.text || "";
-        if (item.type === "image_url")
-          return `[image: ${item.image_url?.url || ""}]`;
+        if (item.type === "image_url") return `[image: ${item.image_url?.url || ""}]`;
         if (item.type === "image") return `[image: ${item.image || ""}]`;
-        if (item.type === "file")
-          return `[file: ${item.file || item.name || ""}]`;
+        if (item.type === "file") return `[file: ${item.file || item.name || ""}]`;
         return JSON.stringify(item);
       })
       .filter(Boolean)
@@ -73,8 +68,7 @@ export function isLastMessageToolState(messages) {
   return (
     last.role === "tool" ||
     last.role === "function" ||
-    (last.role === "assistant" &&
-      (last.tool_calls?.length > 0 || last.function_call))
+    (last.role === "assistant" && (last.tool_calls?.length > 0 || last.function_call))
   );
 }
 
@@ -129,8 +123,7 @@ export function buildCompactToolResults(messages) {
   const order = [];
   const bySig = {};
   for (const r of results) {
-    const sig =
-      _toolCallSignature(r.name, r.arguments) || `idx:${order.length}`;
+    const sig = _toolCallSignature(r.name, r.arguments) || `idx:${order.length}`;
     if (!bySig[sig]) {
       order.push(sig);
     }
@@ -150,23 +143,17 @@ export function buildCompactToolResults(messages) {
 
   const parts = [];
   if (lastUserIdx >= 0) {
-    const originalUser = compactText(
-      stringifyOpenAIContent(msgs[lastUserIdx].content),
-      8000,
-    );
-    if (originalUser)
-      parts.push(`Исходная задача пользователя:\nUser: ${originalUser}`);
+    const originalUser = compactText(stringifyOpenAIContent(msgs[lastUserIdx].content), 8000);
+    if (originalUser) parts.push(`Исходная задача пользователя:\nUser: ${originalUser}`);
   }
 
   parts.push(
-    "Уже выполненные инструменты и их результаты в этой задаче (это твоя память — НЕ выполняй их заново):",
+    "Уже выполненные инструменты и их результаты в этой задаче (это твоя память — НЕ выполняй их заново):"
   );
 
   for (const r of deduped) {
     const argsText = r.arguments ? JSON.stringify(r.arguments) : null;
-    const header = argsText
-      ? `${r.name || "tool"}(${argsText})`
-      : `${r.name || "tool"}()`;
+    const header = argsText ? `${r.name || "tool"}(${argsText})` : `${r.name || "tool"}()`;
     parts.push(`\n${header}:\n${compactText(r.content, 1000)}`);
   }
 
@@ -175,13 +162,7 @@ export function buildCompactToolResults(messages) {
     .filter(
       (r) =>
         r.name &&
-        [
-          "list_directory",
-          "read_file",
-          "find_path",
-          "grep",
-          "diagnostics",
-        ].includes(r.name),
+        ["list_directory", "read_file", "find_path", "grep", "diagnostics"].includes(r.name)
     )
     .map((r) => `${r.name || "tool"}()`);
 
@@ -189,31 +170,30 @@ export function buildCompactToolResults(messages) {
   const lowerContents = resultTexts.join("\n").toLowerCase();
   if (lowerContents.includes("outside the project")) {
     parts.push(
-      "\nВажно: инструмент вернул ошибку про путь (outside the project). Повтори вызов с исправленным путём в том формате, который ожидает Zed; если повтор не помогает — объясни ограничение обычным текстом.",
+      "\nВажно: инструмент вернул ошибку про путь (outside the project). Повтори вызов с исправленным путём в том формате, который ожидает Zed; если повтор не помогает — объясни ограничение обычным текстом."
     );
   }
   if (resultTexts.some((t) => !t.trim())) {
     parts.push(
-      "\nВажно: пустой вывод инструмента со Status: Completed — это уже результат, а не повод повторять тот же вызов.",
+      "\nВажно: пустой вывод инструмента со Status: Completed — это уже результат, а не повод повторять тот же вызов."
     );
   }
   if (readonlyDone.length > 0) {
     parts.push(
-      `\nТы уже осмотрел эти пути/файлы: ${readonlyDone.join("; ")}. НЕ вызывай list_directory/read_file повторно для них — вся информация уже есть выше.`,
+      `\nТы уже осмотрел эти пути/файлы: ${readonlyDone.join("; ")}. НЕ вызывай list_directory/read_file повторно для них — вся информация уже есть выше.`
     );
   }
 
   // Explicit continuation instruction (critical for agent loop)
   parts.push(
-    "\nПродолжи исходную задачу, опираясь на эту память. Не повторяй уже выполненные вызовы. Переходи к следующему конкретному шагу: создавай недостающие файлы через write_file, и только когда всё готово — дай финальный обычный ответ. Если нужен инструмент, ответь только минифицированным JSON tool_calls.",
+    "\nПродолжи исходную задачу, опираясь на эту память. Не повторяй уже выполненные вызовы. Переходи к следующему конкретному шагу: создавай недостающие файлы через write_file, и только когда всё готово — дай финальный обычный ответ. Если нужен инструмент, ответь только минифицированным JSON tool_calls."
   );
 
   const text = parts.join("\n");
   const maxTotal = parseInt(process.env.TOOL_CONTEXT_MAX_CHARS || "32000", 10);
   if (text.length > maxTotal) {
     return (
-      text.substring(0, maxTotal).trimEnd() +
-      `\n\n...[tool context truncated to ${maxTotal} chars]`
+      text.substring(0, maxTotal).trimEnd() + `\n\n...[tool context truncated to ${maxTotal} chars]`
     );
   }
   return text;
@@ -238,9 +218,7 @@ export function buildStatelessTranscript(messages) {
       const text = stringifyOpenAIContent(msg.content);
       if (text) parts.push(`Assistant: ${text}`);
       if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-        const actions = msg.tool_calls
-          .map((tc) => tc?.function?.name || tc?.name)
-          .join(", ");
+        const actions = msg.tool_calls.map((tc) => tc?.function?.name || tc?.name).join(", ");
         parts.push(`Assistant used tools: ${actions}`);
       }
     } else if (msg.role === "tool") {
@@ -252,9 +230,7 @@ export function buildStatelessTranscript(messages) {
         parts.push(`Tool result (${name}): ${toolResult}`);
       }
     } else {
-      parts.push(
-        `${msg.role || "message"}: ${stringifyOpenAIContent(msg.content)}`,
-      );
+      parts.push(`${msg.role || "message"}: ${stringifyOpenAIContent(msg.content)}`);
     }
   }
   return parts.join("\n\n");
@@ -282,8 +258,7 @@ export function isToolFailure(content) {
 /** Build a call signature: tool_name + serialized arguments */
 function _makeCallSig(name, args) {
   if (!name) return null;
-  const normalized =
-    typeof args === "object" ? JSON.stringify(args) : String(args || "{}");
+  const normalized = typeof args === "object" ? JSON.stringify(args) : String(args || "{}");
   return `${name}:${normalized.substring(0, 200)}`;
 }
 
@@ -319,10 +294,7 @@ function _currentToolResultSignatures(messages) {
       const name = msgs[i].name;
       // Use the stored arguments from the assistant's tool_calls for signature matching
       const args = prevCallsByNameArgs.get(name) ?? "{}";
-      const sig = _makeCallSig(
-        name,
-        typeof args === "string" ? JSON.parse(args) : args,
-      );
+      const sig = _makeCallSig(name, typeof args === "string" ? JSON.parse(args) : args);
       if (sig) sigs.add(sig);
     }
   }
@@ -343,7 +315,7 @@ export function getRepeatedToolCalls(calls, messages) {
     const name = call?.function?.name ?? call?.name ?? null;
     if (!name) continue;
 
-    let argsObj = {};
+    let argsObj;
     try {
       const rawArgs = call?.function?.arguments ?? call?.arguments ?? "{}";
       argsObj = typeof rawArgs === "string" ? JSON.parse(rawArgs) : rawArgs;
@@ -397,7 +369,7 @@ export function getBlockedToolCalls(calls, messages) {
 
 export function areAllToolsFailed(messages) {
   const toolMessages = (messages || []).filter(
-    (msg) => msg?.role === "tool" || msg?.role === "function",
+    (msg) => msg?.role === "tool" || msg?.role === "function"
   );
   if (toolMessages.length === 0) return false;
   return toolMessages.every((msg) => {
@@ -411,34 +383,22 @@ export function hasOpenAIToolState(messages) {
     (msg) =>
       msg?.role === "tool" ||
       msg?.role === "function" ||
-      (msg?.role === "assistant" &&
-        Array.isArray(msg.tool_calls) &&
-        msg.tool_calls.length > 0) ||
-      (msg?.role === "assistant" && msg.function_call),
+      (msg?.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) ||
+      (msg?.role === "assistant" && msg.function_call)
   );
 }
 
 // ─── Transcript Folding Decision ──────────────────────────────────────────────
 
-export function shouldFoldOpenAITranscript(
-  messages,
-  combinedTools,
-  effectiveChatId,
-) {
-  const nonSystemMessages = (messages || []).filter(
-    (msg) => msg && msg.role !== "system",
-  );
+export function shouldFoldOpenAITranscript(messages, combinedTools, effectiveChatId) {
+  const nonSystemMessages = (messages || []).filter((msg) => msg && msg.role !== "system");
   if (nonSystemMessages.length === 0) return false;
 
   if (hasOpenAIToolState(messages)) return true;
 
   if (!effectiveChatId && nonSystemMessages.length > 1) return true;
 
-  if (
-    Array.isArray(combinedTools) &&
-    combinedTools.length > 0 &&
-    nonSystemMessages.length > 1
-  )
+  if (Array.isArray(combinedTools) && combinedTools.length > 0 && nonSystemMessages.length > 1)
     return true;
 
   return false;
@@ -450,7 +410,7 @@ export function prepareOpenAIMessageInput(
   messages,
   combinedTools,
   effectiveChatId,
-  rawModel = null,
+  rawModel = null
 ) {
   // Force Folding: compress accumulated tool history after auto-reset
   if (rawModel && hasOpenAIToolState(messages)) {
@@ -461,9 +421,7 @@ export function prepareOpenAIMessageInput(
     }
   }
 
-  const lastUserMessage = (messages || [])
-    .filter((msg) => msg && msg.role === "user")
-    .pop();
+  const lastUserMessage = (messages || []).filter((msg) => msg && msg.role === "user").pop();
   if (shouldFoldOpenAITranscript(messages, combinedTools, effectiveChatId)) {
     return {
       messageContent: buildStatelessTranscript(messages),
