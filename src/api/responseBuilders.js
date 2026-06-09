@@ -119,6 +119,13 @@ export function writeToolCallsSse(
 
     // Chunks 2+: arguments delivered in segments (max ~500 chars per chunk)
     const ARG_CHUNK = 500;
+    const argChunks = Math.ceil(args.length / ARG_CHUNK);
+    if (argChunks > 1) {
+      logDebug(
+        `🔨 Splitting ${args.length} args into ${argChunks} chunks for tool_call index=${call.index}`,
+      );
+    }
+
     for (let i = 0; i < args.length; i += ARG_CHUNK) {
       res.write(
         "data: " +
