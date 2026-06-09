@@ -38,27 +38,45 @@ export function compactJsonSchema(schema, depth = 0) {
  * Build Zed tool protocol prompt. Matches Python fork's tools_to_prompt().
  * Sends FULL tool schemas so Qwen knows exact parameter format.
  */
-export function toolsToPrompt(tools) {
-  if (!Array.isArray(tools) || tools.length === 0) return "";
-
-  const compact = tools
+// Shared helper: build compact tool definitions with compressed schemas
+function _buildCompactTools(tools) {
+  return tools
     .map((tool) => {
       const fn = tool?.function || tool;
       if (!fn?.name) return null;
       const item = { name: fn.name };
-      if (fn.description) item.description = fn.description.slice(0, 500);
+      if (fn.description)
+        item.description = truncateForPrompt(fn.description, 120);
       if (fn.parameters && typeof fn.parameters === "object") {
-        item.parameters = fn.parameters;
+        item.parameters = compactJsonSchema(fn.parameters);
       }
       return item;
     })
     .filter(Boolean);
+}
 
+/**
+ * Build Zed tool protocol prompt. Matches Python fork's tools_to_prompt().
+ * Uses compact schemas to keep context window under control.
+ */
+export function toolsToPrompt(tools) {
+  if (!Array.isArray(tools) || tools.length === 0) return "";
+
+  const compact = _buildCompactTools(tools);
   if (compact.length === 0) return "";
 
-  const skillViewRule = compact.some((s) => s.name === "skill_view")
-    ? "\nCRITICAL: Если пользователь спрашивает про skills/config/setup, ВСЕГДА вызывай skill_view первым."
-    : "";
+  // Cap total prompt size — prevent context window overflow with many tools.
+  let schemaStr = JSON.stringify(compact, null, 0);
+  const MAX_SCHEMA_LEN = 6000;
+  if (schemaStr.length > MAX_SCHEMA_LEN) {
+    // Strip descriptions from all but last few tools to save tokens
+    const trimmed = compact.map((t, i) => {
+      if (i < compact.length - 5)
+        return { name: t.name, parameters: { type: "object" } };
+      return t;
+    });
+    schemaStr = JSON.stringify(trimmed, null, 0);
+  }
 
   return `ВАЖНО: инструменты выполняет только внешний клиент Zed, не Qwen Chat.
 Запрещено использовать встроенные инструменты сайта Qwen: web search, online search, research, code interpreter, browser, plugins.
@@ -67,18 +85,12 @@ export function toolsToPrompt(tools) {
 Формат строго такой, без markdown, без \`\`\` и без пояснений вокруг:
 {"tool_calls":[{"name":"tool_name","arguments":{}}]}
 НИКОГДА не пиши намерение вызвать инструмент как видимый текст.
-НИКОГДА не пиши «Читаю», «Вызываю», «Использую tool», «Продолжаю аудит» или подобное повествование перед tool call.
 Либо ТОЛЬКО tool_calls JSON, либо ТОЛЬКО обычный текстовый ответ. Никогда оба вместе.
-После результата tool/function НЕ повторяй тот же самый tool call с теми же arguments.
-Если tool уже вернул Status: Completed — считай результат полученным, даже если вывод пустой.
-Если list_directory уже был выполнен для того же path — НЕ вызывай его снова; используй уже полученный результат.
-Если файловый tool вернул ошибку про путь (например outside the project) — повтори вызов с исправленным путём в формате, который ожидает Zed (обычно с именем папки проекта в начале).
-Если результат достаточен — дай финальный обычный ответ пользователю.
-Повторяй tool call только если изменились arguments или реально нужен другой следующий шаг.
+Pосле результата tool/function НЕ повторяй тот же самый tool call с теми же arguments.
 Не выдумывай инструменты. Используй только имена из списка.
 Если инструмент не нужен, отвечай обычным текстом.
 Доступные Zed tools:
-${JSON.stringify(compact, null, 0)}${skillViewRule}`;
+${schemaStr}`;
 }
 
 // ─── Raw JSON parser helpers (from Python fork) ──────────────────────────────
@@ -179,7 +191,9 @@ export function parseToolCallParts(content) {
 
   // Debug trace
   lastRawContentForDebug.value = text.substring(0, 300);
-  console.log(`[TOOL_PARSE] input=${text.substring(0, 200)}`);
+  console.log(
+    `[TOOL_PARSE] len=${text.length} first=${JSON.stringify(text.substring(0, 150))}`, // eslint-disable-line no-console -- debug
+  );
 
   // Strip full-fence markdown if entire response is fenced JSON
   const fence = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
@@ -194,6 +208,9 @@ export function parseToolCallParts(content) {
   try {
     const parsed = JSON.parse(text);
     const calls = _extractCallsFromParsed(parsed, true);
+    console.log(
+      `[TOOL_PARSE] step1=ok calls=${calls?.length || 0}`, // eslint-disable-line no-console -- debug
+    );
     if (calls && calls.length > 0) return { visible: "", calls: calls };
   } catch {}
 
@@ -260,8 +277,13 @@ export function parseToolCallParts(content) {
       }
 
       // Marker found but JSON unparseable — suppress leak
-      const cut = text.lastIndexOf("{", 0, jsonStart);
-      visible = (cut >= 0 ? text.slice(0, cut) : text).trim();
+      visible = text
+        .slice(0, jsonStart)
+        .replace(/```(?:json)?\s*```/gi, "")
+        .trim();
+      console.log(
+        `[TOOL_PARSE] step2=fail (unparseable) marker@${markerPos} jsonStart=${jsonStart}`, // eslint-disable-line no-console -- debug
+      );
       return { visible: visible || null, calls: [] };
     }
   }
@@ -299,6 +321,9 @@ export function parseToolCallParts(content) {
   }
 
   // No tool_calls found — return full text as visible
+  console.log(
+    `[TOOL_PARSE] fallback=visible no-tool-calls-found`, // eslint-disable-line no-console -- debug
+  );
   return { visible: content.trim(), calls: null };
 }
 
@@ -357,26 +382,27 @@ export function applyToolPrompt(systemMessage, tools, inAgentLoop = false) {
 
 /** Agent-loop prompt: model has tool results.
  * Light version — don't coerce into more tool calls, but keep anti-loop guard.
- * Matches Python fork's approach with full schemas + continuation rules. */
+ * Uses compact schemas to fit context window. */
 export function toolsToLightPrompt(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return "";
 
-  const compact = tools
-    .map((tool) => {
-      const fn = tool?.function || tool;
-      if (!fn?.name) return null;
-      const item = { name: fn.name };
-      if (fn.description) item.description = fn.description.slice(0, 500);
-      if (fn.parameters && typeof fn.parameters === "object") {
-        item.parameters = fn.parameters;
-      }
-      return item;
-    })
-    .filter(Boolean);
+  const compact = _buildCompactTools(tools);
 
-  // CRITICAL: When the model received a tool result that contains an error message,
-  // it tends to echo that error as its own response text instead of calling another tool.
-  // We MUST explicitly forbid this pattern and force JSON tool_calls format continuation.
+  // Cap schema size — same limit as full prompt to prevent context overflow
+  let schemaStr = JSON.stringify(compact, null, 0);
+  const MAX_SCHEMA_LEN = 6000;
+  if (schemaStr.length > MAX_SCHEMA_LEN) {
+    schemaStr = JSON.stringify(
+      compact.map((t, i) =>
+        i < compact.length - 5
+          ? { name: t.name, parameters: { type: "object" } }
+          : t,
+      ),
+      null,
+      0,
+    );
+  }
+
   return `=== TOOL USAGE RULES ===
 You are in AGENT LOOP with tools. Your task is to EXECUTE actions, not explain them:
 - Received error from a tool? ANALYZE the error → CALL another tool with CORRECTED arguments OR give final answer
@@ -385,11 +411,10 @@ You are in AGENT LOOP with tools. Your task is to EXECUTE actions, not explain t
 - If Status: Completed — consider the result received even if output is empty
 - Task COMPLETE → Write plain text answer with findings WITHOUT any JSON
 - NEVER output your intention to call a tool as visible text
-- NEVER write "Читаю", "Calling", "Using tool", "Continuing audit" or similar narration before a tool call
 - Either output ONLY the tool_calls JSON OR ONLY plain text answer. Never both.
 
 When you NEED to call another tool, output ONLY this minified JSON (no surrounding text, no markdown):
 {"tool_calls":[{"name":"","arguments":{}}]}
 Available Zed tools:
-${JSON.stringify(compact, null, 0)}`;
+${schemaStr}`;
 }
