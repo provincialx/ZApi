@@ -565,18 +565,23 @@ async function handleApiError(
   retryCount,
   onChunk = null,
 ) {
+  // Build error message — caller is responsible for logging.
+  // Don't log here: "in progress", "not exist" etc. are transient and
+  // retried automatically, so logging them as [error] creates noise.
   const errMsg =
     response.error ||
     response.statusText ||
     (response.status ? `HTTP ${response.status}` : "Неизвестная ошибка");
-  if (!response.error && !response.statusText) {
+  if (
+    !response.error &&
+    !response.statusText &&
+    !response.status &&
+    !response.errorBody
+  ) {
     logWarn(
       `handleApiError получил неполный объект: ключи=${Object.keys(response).join(",")}`,
     );
   }
-  logError(`Ошибка при получении ответа: ${errMsg}`);
-  if (response.errorBody)
-    logWarn(`Ошибка API ответ: ${response.errorBody.substring(0, 500)}`);
 
   if (response.html && response.html.includes("Verification")) {
     setAuthenticationStatus(false);
@@ -897,6 +902,12 @@ export async function sendMessage(
         }
       }
 
+      // All transient retries exhausted — log final error.
+      logError(
+        `Ошибка API для чата ${chatId}: ${apiResult.error || "неизвестно"}`,
+      );
+      if (response.errorBody)
+        logWarn(`Ошибка API ответ: ${response.errorBody.substring(0, 500)}`);
       return apiResult;
     }
   } catch (error) {
