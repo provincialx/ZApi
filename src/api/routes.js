@@ -15,7 +15,10 @@ import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
 import { getMappedModel } from "./modelMapping.js";
 import { loadHistory, saveHistory } from "./chatHistory.js";
 import crypto from "crypto";
-import { ALLOW_UNSCOPED_SESSION_CHAT_RESTORE } from "../config.js";
+import {
+  ALLOW_UNSCOPED_SESSION_CHAT_RESTORE,
+  REQUEST_TIMEOUT_MINUTES,
+} from "../config.js";
 
 // ─── Chat Session (idempotency, chat ID resolution, scoped sessions) ──────────
 import {
@@ -411,17 +414,18 @@ router.post("/chat/completions", async (req, res) => {
           return;
         }
 
-        const result = await sendMessage(
-          messageContent,
-          mappedModel,
-          qwenChatId,
-          effectiveParentId,
-          files,
-          qwenTools,
-          tool_choice,
-          finalSystemMessage,
-          streamingCallback,
-        );
+        const result = await withRequestTimeout(
+          sendMessage(
+            messageContent,
+            mappedModel,
+            qwenChatId,
+            effectiveParentId,
+            files,
+            qwenTools,
+            tool_choice,
+            finalSystemMessage,
+            streamingCallback),
+      );
 
         // Parse tool calls — always capture the parsed result for fallback use.
         // When Qwen returns text like "Привет" + {"tool_calls":[]}, we need
@@ -641,16 +645,17 @@ router.post("/chat/completions", async (req, res) => {
       }
     } else {
       const qwenChatId = await resolveQwenChatId(effectiveChatId, mappedModel);
-      const result = await sendMessage(
-        messageContent,
-        mappedModel,
-        qwenChatId,
-        effectiveParentId,
-        null, // files
-        qwenTools,
-        tool_choice,
-        finalSystemMessage,
-      );
+      const result = await withRequestTimeout(
+        sendMessage(
+          messageContent,
+          mappedModel,
+          qwenChatId,
+          effectiveParentId,
+          null, // files
+          qwenTools,
+          tool_choice,
+          finalSystemMessage),
+    );
 
       persistSessionState(
         result,
@@ -776,3 +781,4 @@ router.post("/chat/completions", async (req, res) => {
 // ─── Export ──────────────────────────────────────────────────────────────────
 
 export default router;
+
