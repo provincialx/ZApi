@@ -350,7 +350,25 @@ router.post("/chat/completions", async (req, res) => {
             model: mappedModel || "qwen-max-latest",
             choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
           });
+
+          // If tools were provided, check if cached response contains tool calls.
+          // Must parse and return as tool_calls, not plain text.
           const cachedContent = cachedResult.choices?.[0]?.message?.content;
+          if (captureToolCalls && cachedContent) {
+            const cacheParts = parseToolCallParts(cachedContent);
+            const cacheToolCalls = normalizeToolCalls(cacheParts.calls || []);
+
+            if (cacheToolCalls && cacheToolCalls.length > 0) {
+              logInfo(
+                `🔨 Cached response contains ${cacheToolCalls.length} tool calls — forwarding via SSE`
+              );
+              writeToolCallsSse(res, mappedModel, cachedResult, cacheToolCalls, cacheParts.visible);
+              res.write("data: [DONE]\n\n");
+              res.end();
+              return;
+            }
+          }
+
           if (cachedContent)
             writeSse({
               id: "chatcmpl-stream",
@@ -405,9 +423,21 @@ router.post("/chat/completions", async (req, res) => {
         let parts = null;
         if (captureToolCalls) {
           streamingCallback = null; // Force non-streaming — atomic tool_call parsing
-          parts = parseToolCallParts(result?.choices?.[0]?.message?.content);
+          const rawContent = result?.choices?.[0]?.message?.content;
+          logDebug(
+            `[TOOL_PARSE] raw content first 200 chars: ${String(rawContent || "")
+              .substring(0, 200)
+              .replace(/\n/g, "\\n")}`
+          );
+          logDebug(
+            `[TOOL_PARSE] raw content length: ${String(rawContent || "").length}, type: ${typeof rawContent}`
+          );
+          parts = parseToolCallParts(rawContent);
           const rawCalls = parts.calls || [];
           const toolCalls = normalizeToolCalls(rawCalls);
+          logDebug(
+            `[TOOL_PARSE] result → visible=${parts.visible ? "yes" : "no"}, calls=${rawCalls.length}, normalized=${toolCalls?.length || 0}`
+          );
 
           // Anti-loop: detect repeated/blocked tool calls (from Python fork)
           if (toolCalls && toolCalls.length > 0) {
@@ -515,13 +545,16 @@ router.post("/chat/completions", async (req, res) => {
           }
         }
 
-        // Warn: модель получила инструменты но не использовала
+        // Warn: модель получила инструменты но не использовала.
+        // Only warn if we didn't successfully parse tool calls from content either.
+        const hasParsedToolCalls = parts?.calls && parts.calls.length > 0;
         if (
           Array.isArray(combinedTools) &&
           combinedTools.length > 0 &&
           !result.error &&
           result.choices?.[0]?.message &&
           !result.choices[0].message.tool_calls &&
+          !hasParsedToolCalls &&
           result.choices[0].message.content
         ) {
           logWarn(
