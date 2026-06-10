@@ -3,8 +3,6 @@ import adminRoutes from "./adminRoutes.js";
 import fileRoutes from "./fileRoutes.js";
 import { sendMessage, getApiKeys } from "./chat.js";
 import {
-  truncateForPrompt,
-  compactJsonSchema,
   toolsToPrompt,
   toolsToLightPrompt,
   parseToolCallParts,
@@ -15,13 +13,12 @@ import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
 import { getMappedModel } from "./modelMapping.js";
 import { loadHistory, saveHistory } from "./chatHistory.js";
 import crypto from "crypto";
-import { ALLOW_UNSCOPED_SESSION_CHAT_RESTORE, REQUEST_TIMEOUT_MINUTES } from "../config.js";
+import { ALLOW_UNSCOPED_SESSION_CHAT_RESTORE } from "../config.js";
 
 // ─── Chat Session (idempotency, chat ID resolution, scoped sessions) ──────────
 import {
   getIdempotencyKey,
   getCachedResult,
-  cacheResult,
   generateChatIdFromHistory,
   normalizeIdValue,
   buildInternalChatIdFromHint,
@@ -39,13 +36,11 @@ import {
 
 // ─── OpenAI Message Processing ─────────────────────────────────────────────
 import {
-  parseOpenAIMessages,
   buildCombinedTools,
   areAllToolsFailed,
   hasOpenAIToolState,
   prepareOpenAIMessageInput,
   getRepeatedToolCalls,
-  getBlockedToolCalls,
 } from "./openaiUtils.js";
 
 // ─── Project Context (anti-hallucination) ───────────────────────────────────
@@ -442,7 +437,6 @@ router.post("/chat/completions", async (req, res) => {
           // Anti-loop: detect repeated/blocked tool calls (from Python fork)
           if (toolCalls && toolCalls.length > 0) {
             const repeated = getRepeatedToolCalls(toolCalls, messages);
-            const blocked = getBlockedToolCalls(toolCalls, messages);
 
             if (repeated.length > 0) {
               logInfo(`🔁 Anti-loop guard: ${repeated.join(", ")} уже выполнялись`);

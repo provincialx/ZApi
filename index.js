@@ -9,7 +9,7 @@ import { loadTokens } from "./src/api/tokenManager.js";
 import { addAccountInteractive } from "./src/utils/accountSetup.js";
 import { logHttpRequest, logInfo, logError, logWarn } from "./src/logger/index.js";
 import { prompt } from "./src/utils/prompt.js";
-import { CONTACT_INFO, FORGETMEAI_WATERMARK } from "./src/utils/branding.js";
+import { CONTACT_INFO } from "./src/utils/branding.js";
 import { PORT, HOST } from "./src/config.js";
 
 const app = express();
@@ -87,7 +87,7 @@ app.use((req, res) => {
   res.status(404).json({ error: "Эндпоинт не найден" });
 });
 
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   logError("Внутренняя ошибка сервера", err);
   res.status(500).json({ error: "Внутренняя ошибка сервера" });
 });

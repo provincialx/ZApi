@@ -5,7 +5,7 @@ import { pagePool } from "../browser/pagePool.js";
 import { getAvailableToken } from "./tokenManager.js";
 import fs from "fs";
 import path from "path";
-import { STS_TOKEN_API_URL, OSS_SDK_URL, UPLOADS_DIR } from "../config.js";
+import { STS_TOKEN_API_URL, OSS_SDK_URL } from "../config.js";
 
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
 const DOCUMENT_EXTENSIONS = [".pdf", ".doc", ".docx", ".txt"];

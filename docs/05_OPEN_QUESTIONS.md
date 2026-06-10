@@ -2,19 +2,12 @@
 
 ## Active tech-debt items
 
-### Low priority (non-blocking)
 
-| # | Issue | Location | Risk |
-|---|-------|----------|------|
-| D1 | ESLint: `removeInvalidToken` imported but unused | `chat.js` L12 | Dead code — never referenced at runtime |
-| D2 | Unused imports in routes.js (pre-refactor leftovers) | Various lines | Harmless. Fix when file is already open for another change per rules. |
-| D3 | ESLint warnings: ~10 unused-var, no-empty catch, etc. | Multiple files | Warnings only — not errors. Known tech-debt tracked by linter. |
 
 ### Medium priority (should fix soon)
 
 | # | Issue | Impact | Notes |
 |---|-------|--------|-------|
-| D4 | Node.js streaming uses global `fetch` without explicit guard | Older Node versions (<18) may fail silently | Current fallback to browser fetch works via try/catch. Prefer explicit `typeof fetch === 'function'` check in executeApiRequestWithNodeStreaming path (qwenApi.js L203). |
 | D5 | Page pool memory accumulates at extreme agent-loop (>100 calls) | Memory leak grows monotonically under sustained heavy usage | Hard limit 5 + idle TTL GC mitigated acute cases. Consider auto-refreshing pages after N requests or T seconds alive-time to prevent Chromium DOM/JS heap growth regardless of pool size. |
 | D6 | No integration/end-to-end tests — only unit tests | Regression testing requires manual smoke tests via running server | Unit suite (46 tests) covers pure logic functions well but not browser interaction, SSE delivery, or chat ID resolution end-to-end. Smoke test script exists (`scripts/smoke_test.js`) but needs live server + browser to run. |
 
