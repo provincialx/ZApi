@@ -57,38 +57,76 @@ function isCaptchaChallenge(errorBody) {
   return body.includes("FAIL_SYS_USER_VALIDATE");
 }
 
-async function resolveCaptcha(browserContext) {
-  // Show browser so user can see and solve the CAPTCHA.
-  console.log("------------------------------------------------------");
-  console.log("              ⚠️  ЗАПРОШЕНА КАПЧА (CAPTCHA)");
+/** Show headed browser for user to solve CAPTCHA, refresh token, then retry. */
+async function resolveCaptchaAndRetry(
+  browserContext,
+  messageContent,
+  model,
+  chatId,
+  parentId,
+  files,
+  tools,
+  toolChoice,
+  systemMessage,
+  retryCount,
+  onChunk
+) {
+  console.log("\n------------------------------------------------------");
+  console.log(`              ⚠️  ЗАПРОШЕНА КАПЧА (CAPTCHA)`);
   console.log("------------------------------------------------------");
   console.log(
-    "Qwen определил подозрительную активность и запросил CAPTCHA.\nПросмотрите открытый браузер, решите капчу, затем нажмите ENTER."
+    "Qwen запросил CAPTCHA из-за подозрительной активности.\nОткройте браузер, решите капчу, затем нажмите ENTER в консоли."
   );
   console.log("------------------------------------------------------");
 
   try {
-    const page = await pagePool.getPage(browserContext);
-    try {
-      // Navigate to chat list — Qwen shows CAPTCHA challenge on the main page.
-      await page.goto(CHAT_PAGE_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: PAGE_TIMEOUT,
-      });
-      await delay(2000);
-    } catch (e) {
-      logWarn(`Не удалось загрузить страницу для CAPTCHA: ${e.message}`);
+    const captchaPage = await pagePool.getPage(browserContext);
+    await captchaPage.goto(CHAT_PAGE_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: PAGE_TIMEOUT,
+    });
+
+    console.log("\nПосле прохождения CAPTCHA нажмите ENTER...");
+    await new Promise((resolve) => {
+      process.stdout.write("> ");
+      const onData = (data) => {
+        process.stdin.removeListener("data", onData);
+        process.stdin.pause();
+        resolve(true);
+      };
+      process.stdin.resume();
+      process.stdin.once("data", onData);
+    });
+
+    console.log("CAPTCHA подтверждена, обновляю сессию...");
+    await delay(3000);
+
+    // Re-extract auth token.
+    const newToken =
+      (await captchaPage.evaluate(() => localStorage.getItem("token"))) || getAuthToken();
+    if (newToken) {
+      setAuthToken(newToken);
+      saveAuthToken(newToken);
+      logInfo(`Токен обновлён после CAPTCHA`);
     }
 
-    // Wait for user to solve captcha manually.
-    await promptUser("\nПосле прохождения CAPTCHA нажмите ENTER... ");
-    console.log("CAPTCHA подтверждена, ожидание применения...");
-    await delay(3000); // Give Qwen time to register the solved captcha
-
-    pagePool.releasePage(page);
-  } catch (e) {
-    logWarn(`Ошибка при обработке CAPTCHA: ${e.message}`);
+    pagePool.releasePage(captchaPage);
+  } catch {
+    console.log("CAPTCHA сессия завершена.");
   }
+
+  return sendMessage(
+    messageContent,
+    model,
+    chatId,
+    parentId,
+    files,
+    tools,
+    toolChoice,
+    systemMessage,
+    (retryCount || 0) + 1,
+    onChunk
+  );
 }
 
 // ─── sendMessage — helper functions ──────────────────────────────────────
@@ -805,24 +843,30 @@ export async function sendMessage(
 
     logInfo("Отправка запроса к API v2...");
 
-    // CAPTCHA simulation: return fake error BEFORE actual request to test resolver e2e.
+    // CAPTCHA simulation: inject fake error response to test resolver e2e.
     // Fires once per process, only on first call (retryCount === 0).
     const simulateCaptcha =
       process.env.SIMULATE_CAPTCHA === "true" && !_captchaSimulated && retryCount === 0;
-
-    // Always log so we can verify env is actually set
-    if (!_captchaSimulated) {
-      logInfo(
-        `[SIM] SIM=${process.env.SIMULATE_CAPTCHA || "(not set)"}, simulated=${_captchaSimulated}, retries=${retryCount}`
-      );
-    }
 
     if (simulateCaptcha) {
       _captchaSimulated = true;
       logInfo("[СИМУЛЯЦИЯ] CAPTCHA — пропускаю реальный запрос, запускаю resolver");
       pagePool.releasePage(page);
       page = null;
-      return { success: false, isCaptcha: true };
+      // Return fake error that flows through normal isCaptcha handling below
+      return resolveCaptchaAndRetry(
+        browserContext,
+        messageContent,
+        model,
+        chatId,
+        parentId,
+        files,
+        tools,
+        toolChoice,
+        systemMessage,
+        retryCount,
+        onChunk
+      );
     }
 
     const payload = buildPayloadV2(
@@ -866,52 +910,9 @@ export async function sendMessage(
         response.isCaptcha ||
         (response.errorBody && String(response.errorBody).includes("FAIL_SYS_USER_VALIDATE"))
       ) {
-        console.log("\n------------------------------------------------------");
-        console.log(`              ⚠️  ЗАПРОШЕНА КАПЧА (CAPTCHA)`);
-        console.log("------------------------------------------------------");
-        console.log(
-          "Qwen запросил CAPTCHA из-за подозрительной активности.\nОткройте браузер, решите капчу, затем нажмите ENTER в консоли."
-        );
-        console.log("------------------------------------------------------");
-
-        try {
-          const captchaPage = await pagePool.getPage(browserContext);
-          await captchaPage.goto(CHAT_PAGE_URL, {
-            waitUntil: "domcontentloaded",
-            timeout: PAGE_TIMEOUT,
-          });
-
-          console.log("\nПосле прохождения CAPTCHA нажмите ENTER...");
-          await new Promise((resolve) => {
-            process.stdout.write("> ");
-            const onData = (data) => {
-              process.stdin.removeListener("data", onData);
-              process.stdin.pause();
-              resolve(true);
-            };
-            process.stdin.resume();
-            process.stdin.once("data", onData);
-          });
-
-          console.log("CAPTCHA подтверждена, обновляю сессию...");
-          await delay(3000);
-
-          // Re-extract auth token.
-          const newToken =
-            (await captchaPage.evaluate(() => localStorage.getItem("token"))) || getAuthToken();
-          if (newToken) {
-            setAuthToken(newToken);
-            saveAuthToken(newToken);
-            logInfo(`Токен обновлён после CAPTCHA`);
-          }
-
-          pagePool.releasePage(captchaPage);
-        } catch {
-          console.log("CAPTCHA сессия завершена.");
-        }
-
-        return sendMessage(
-          message,
+        return resolveCaptchaAndRetry(
+          browserContext,
+          messageContent,
           model,
           chatId,
           parentId,
@@ -919,7 +920,7 @@ export async function sendMessage(
           tools,
           toolChoice,
           systemMessage,
-          (retryCount || 0) + 1,
+          retryCount,
           onChunk
         );
       }
