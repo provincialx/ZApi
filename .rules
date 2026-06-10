@@ -1,3 +1,5 @@
+Do not use regex!
+
 ## Tool Path & Edit Rules (CRITICAL)
 
 > ⚠️ **THIS IS THE #1 REASON `edit_file` FAILS ON README FILES.** DO NOT SKIP.
