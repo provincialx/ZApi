@@ -810,9 +810,10 @@ export async function sendMessage(
     const simulateCaptcha =
       process.env.SIMULATE_CAPTCHA === "true" && !_captchaSimulated && retryCount === 0;
 
-    if (process.env.SIMULATE_CAPTCHA) {
+    // Always log so we can verify env is actually set
+    if (!_captchaSimulated) {
       logInfo(
-        `[SIM] SIMULATE_CAPTCHA=${process.env.SIMULATE_CAPTCHA}, _captchaSimulated=${_captchaSimulated}, retryCount=${retryCount} => simulate=${simulateCaptcha}`
+        `[SIM] SIM=${process.env.SIMULATE_CAPTCHA || "(not set)"}, simulated=${_captchaSimulated}, retries=${retryCount}`
       );
     }
 
