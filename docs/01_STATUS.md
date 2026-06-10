@@ -2,7 +2,7 @@
 
 ## Health: GREEN
 
-All core paths operational. 48 development sessions across 4 days (June 7–10). No blocking issues.
+All core paths operational. 50 development sessions across 4 days (June 7–10). No blocking issues.
 
 | Area | Status | Notes |
 |------|--------|-------|
@@ -15,6 +15,7 @@ All core paths operational. 48 development sessions across 4 days (June 7–10).
 | ESLint | Clean | 0 errors, ~10 warnings (known unused imports — tech-debt) |
 | Prettier | Formatted | All files clean |
 | CAPTCHA handling | Active | Visible browser resolver + reader timeout guard against stream hangs |
+| Agent skill infrastructure | Active | Global `edit-path-fix` skill ensures root-level files resolve correctly (S49) |
 
 ## Quick Start
 
