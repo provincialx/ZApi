@@ -87,7 +87,7 @@ async function resolveCaptcha(browserContext) {
   }
 }
 
-// ─── sendMessage — helper functions ──────────────────────────────────────────
+// ─── sendMessage — helper functions ──────────────────────────────────────
 
 function validateAndPrepareMessage(message) {
   if (message === null || message === undefined) {
@@ -803,6 +803,71 @@ export async function sendMessage(
       }
       return response.data;
     } else {
+      // ── CAPTCHA detection (FAIL_SYS_USER_VALIDATE) ─────────────────────
+      if (response.errorBody && String(response.errorBody).includes("FAIL_SYS_USER_VALIDATE")) {
+        console.log("------------------------------------------------------");
+        console.log("              ⚠️  ЗАПРОШЕНА КАПЧА (CAPTCHA)");
+        console.log("------------------------------------------------------");
+        console.log(
+          "Qwen запросил CAPTCHA из-за подозрительной активности.\nОткройте браузер, решите капчу, затем нажмите ENTER в консоли."
+        );
+        console.log("------------------------------------------------------");
+
+        // Show browser and wait for user to solve.
+        await pagePool.getPage(browserContext);
+        try {
+          const captchaPage = await pagePool.getPage(browserContext);
+          await captchaPage.goto(CHAT_PAGE_URL, {
+            waitUntil: "domcontentloaded",
+            timeout: PAGE_TIMEOUT,
+          });
+
+          // CLI prompt — stdin wait.
+          console.log("\nПосле прохождения CAPTCHA нажмите ENTER...");
+          await new Promise((resolve) => {
+            process.stdout.write("> ");
+            const onData = (data) => {
+              process.stdin.removeListener("data", onData);
+              process.stdin.pause();
+              resolve(true);
+            };
+            process.stdin.resume();
+            process.stdin.once("data", onData);
+          });
+
+          console.log("CAPTCHA подтверждена, обновляю сессию...");
+          await delay(3000);
+
+          // Re-extract auth token.
+          const newToken =
+            (await captchaPage.evaluate(() => localStorage.getItem("token"))) || getAuthToken();
+          if (newToken) {
+            setAuthToken(newToken);
+            saveAuthToken(newToken);
+            logInfo(`Токен обновлён после CAPTCHA: ${String(newToken).substring(0, 12)}...`);
+          }
+
+          pagePool.releasePage(captchaPage);
+        } catch (e) {
+          console.log("CAPTCHA сессия завершена.");
+        }
+
+        // Retry with retryCount + 1 to prevent infinite loop if captcha fails again.
+        return sendMessage(
+          message,
+          model,
+          chatId,
+          parentId,
+          files,
+          tools,
+          toolChoice,
+          systemMessage,
+          (retryCount || 0) + 1,
+          onChunk
+        );
+      }
+
+      // ── Normal error handling path ─────────────────────────────────────
       const apiResult = await handleApiError(
         response,
         tokenObj,
@@ -814,24 +879,6 @@ export async function sendMessage(
         retryCount,
         onChunk
       );
-
-      // CAPTCHA challenge: Qwen rate-limited the account — show browser, wait for user.
-      if (response.errorBody && isCaptchaChallenge(response.errorBody) && retryCount === 0) {
-        logWarn(`CAPTCHA запрошена для чата ${chatId}. Показываю браузер...`);
-        await resolveCaptcha(browserContext);
-        return sendMessage(
-          message,
-          model,
-          chatId,
-          parentId,
-          files,
-          tools,
-          toolChoice,
-          systemMessage,
-          retryCount + 1,
-          onChunk
-        );
-      }
 
       // Distinguish between parent_id not exist and chat not exist.
       // "parent_id X is not exist" means the stale parentId was cached — just reset it.
