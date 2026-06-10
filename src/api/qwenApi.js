@@ -80,14 +80,20 @@ async function resolveCaptchaAndRetry(
   console.log("------------------------------------------------------");
 
   try {
-    // Shutdown headless browser and restart in VISIBLE mode so user can see CAPTCHA.
+    // Save current cookies BEFORE shutdown so we can restore them after restart.
     logInfo("Перезапуск браузера в видимом режиме для CAPTCHA...");
+    const savedCookies = await _browserContext.cookies();
+    logInfo(`Сохранено ${savedCookies.length} куков перед перезапуском`);
+
+    const token = getAuthToken();
+
+    // Shutdown headless and start visible browser WITHOUT manual auth prompt.
     await shutdownBrowser();
     await delay(2000);
-    await initBrowser(true); // visible = true
-    const newBrowserContext = getBrowserContext();
+    await initBrowser(true, true); // visible + skipManualAuth
+    const visibleContext = getBrowserContext();
 
-    if (!newBrowserContext) {
+    if (!visibleContext) {
       console.log("Не удалось запустить браузер для CAPTCHA.");
       return sendMessage(
         messageContent,
@@ -103,11 +109,43 @@ async function resolveCaptchaAndRetry(
       );
     }
 
-    const captchaPage = await pagePool.getPage(newBrowserContext);
-    await captchaPage.goto(CHAT_PAGE_URL, {
-      waitUntil: "domcontentloaded",
-      timeout: PAGE_TIMEOUT,
-    });
+    // Restore session cookies so the browser is already logged in.
+    if (savedCookies.length > 0) {
+      logInfo(`Восстановление ${savedCookies.length} куков для CAPTCHA...`);
+      try {
+        await visibleContext.setCookie(...savedCookies);
+        const restored = await visibleContext.cookies();
+        logInfo(`Куки восстановлены (${restored.length})`);
+      } catch (e) {
+        logWarn(`Ошибка при восстановлении куков: ${e.message}`);
+      }
+    }
+
+    // Fallback: inject token into localStorage as backup
+    if (token) {
+      try {
+        const tmpPage = await visibleContext.newPage();
+        await tmpPage.evaluate((t) => {
+          localStorage.setItem("token", t);
+          localStorage.setItem("chat.qwen.ai_token", t);
+        }, token);
+        logInfo("Токен inject в localStorage");
+        await tmpPage.close();
+      } catch (e) {
+        logWarn(`Inject токена не удался: ${e.message}`);
+      }
+    }
+
+    // Open CAPTCHA page.
+    const captchaPage = await pagePool.getPage(visibleContext);
+    try {
+      await captchaPage.goto(CHAT_PAGE_URL, {
+        waitUntil: "domcontentloaded",
+        timeout: PAGE_TIMEOUT,
+      });
+    } catch (e) {
+      logWarn(`Не удалось загрузить страницу CAPTCHA: ${e.message}`);
+    }
 
     console.log("\nПосле прохождения CAPTCHA нажмите ENTER...");
     await new Promise((resolve) => {
@@ -124,7 +162,7 @@ async function resolveCaptchaAndRetry(
     console.log("CAPTCHA подтверждена, обновляю сессию...");
     await delay(3000);
 
-    // Re-extract auth token.
+    // Re-extract auth token from browser after CAPTCHA solved.
     const newToken =
       (await captchaPage.evaluate(() => localStorage.getItem("token"))) || getAuthToken();
     if (newToken) {
@@ -135,11 +173,11 @@ async function resolveCaptchaAndRetry(
 
     pagePool.releasePage(captchaPage);
 
-    // Restart headless browser for normal operation.
+    // Return to headless mode.
     logInfo("Возвращаю браузер в фоновый режим...");
     await shutdownBrowser();
     await delay(2000);
-    await initBrowser(false); // visible = false (headless)
+    await initBrowser(false);
   } catch {
     console.log("CAPTCHA сессия завершена.");
   }
