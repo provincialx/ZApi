@@ -279,6 +279,46 @@ export function invalidateModelDefaultChat(model) {
   forceResetModels.add(model);
 }
 
+/**
+ * Invalidate a specific Qwen chat ID across all maps.
+ * Call this when sendMessage receives "chat not exist" from Qwen API,
+ * so the stale entry doesn't get reused on the next request.
+ */
+export function invalidateQwenChatId(qwenChatId) {
+  let removed = false;
+
+  // Remove from chatIdMap — any generated ID mapping to this dead chat
+  for (const [key, val] of chatIdMap.entries()) {
+    if (val === qwenChatId) {
+      chatIdMap.delete(key);
+      logDebug(`🗑 Очишен маппинг на несуществующий чат: ${key} -> ${qwenChatId}`);
+      removed = true;
+    }
+  }
+
+  // Remove from modelDefaultChats — any model defaulting to this dead chat
+  for (const [model, entry] of modelDefaultChats.entries()) {
+    if (entry.chatId === qwenChatId) {
+      modelDefaultChats.delete(model);
+      logInfo(`🗑 Удалён stale default-чат для ${model}: ${qwenChatId}`);
+      removed = true;
+    }
+  }
+
+  // Remove from sessionToChatMap — any session holding this dead chat reference
+  for (const [key, val] of sessionToChatMap.entries()) {
+    if (val.chatId === qwenChatId) {
+      sessionToChatMap.delete(key);
+      logDebug(`🗑 Очищена сессия со stale чатом: ${key.substring(0, 8)}...`);
+      removed = true;
+    }
+  }
+
+  if (removed) {
+    logInfo(`♻️ Инвалидирован несуществующий Qwen чат: ${qwenChatId}`);
+  }
+}
+
 // Expose for auto-reset increment in routes
 export function getModelDefaultChats() {
   return modelDefaultChats;
@@ -339,6 +379,7 @@ export async function resolveQwenChatId(effectiveChatId, mappedModel) {
   }
 
   // If no effective ID or it's generated — try default for model
+  let defaultResolved = false;
   if (!qwenChatId || effectiveChatId?.startsWith("chat_")) {
     const defaultForModel = getOrCreateModelDefaultChat(mappedModel);
     if (defaultForModel) {
@@ -348,11 +389,15 @@ export async function resolveQwenChatId(effectiveChatId, mappedModel) {
       if (effectiveChatId && effectiveChatId.startsWith("chat_")) {
         mapChatId(effectiveChatId, qwenChatId);
       }
+
+      defaultResolved = true;
     }
   }
 
-  // Create new Qwen chat only if no mapping and no default for model
-  if (!qwenChatId && effectiveChatId && effectiveChatId.startsWith("chat_")) {
+  // Create new Qwen chat if we're still holding a proxy-generated ID and no default was found.
+  // defaultResolved === false means modelDefaultChats had no valid entry for this model
+  // (server restart, 24h expiry). Without creating here, the proxy-hash reaches Qwen → "not exist".
+  if (!defaultResolved && effectiveChatId?.startsWith("chat_") && qwenChatId === effectiveChatId) {
     try {
       const created = await createChatV2(mappedModel, "Сессия OpenWebUI");
       if (created && created.chatId) {
@@ -366,6 +411,12 @@ export async function resolveQwenChatId(effectiveChatId, mappedModel) {
     } catch (error) {
       logDebug(`Не удалось создать Qwen chat для ${effectiveChatId}: ${error.message}`);
     }
+  }
+
+  // When effective ID is null and no default was found — rely on sendMessage() to create one.
+  // This happens for meta-requests or explicit null-chat scenarios.
+  if (!qwenChatId && !effectiveChatId) {
+    return null;
   }
 
   return qwenChatId;

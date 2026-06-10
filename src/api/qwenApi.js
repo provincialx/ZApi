@@ -19,6 +19,7 @@ import { shutdownBrowser, initBrowser } from "../browser/browser.js";
 import { saveAuthToken } from "../browser/session.js";
 import { pagePool, createPage, evaluateWithTimeout } from "../browser/pagePool.js";
 import { getAvailableToken, markRateLimited } from "./tokenManager.js";
+import { invalidateQwenChatId } from "./chatSession.js";
 import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
 import crypto from "crypto";
 import {
@@ -926,6 +927,10 @@ export async function sendMessage(
       // Only allow ONE new-chat creation on "not exist" to prevent infinite loop.
       if (response.errorBody && /not exist/i.test(response.errorBody) && retryCount === 0) {
         logWarn(`Qwen чат ${chatId} больше не существует. Создаю новый и повторяю запрос...`);
+
+        // Invalidate stale mappings BEFORE creating new chat so next request doesn't reuse dead ID.
+        invalidateQwenChatId(chatId);
+
         const newChatResult = await createChatV2(model, "Сессия", 0, tokenObj);
         if (newChatResult && newChatResult.chatId) {
           // Retry with new chat. Reset parentId — old parent message doesn't exist in the new chat.

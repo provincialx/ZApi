@@ -126,6 +126,7 @@ flowchart LR
     R --> TM[tokenManager.js]
 
     Q[qwenApi.js] --> C[chat.js::getAuthToken/setAuthToken]
+    Q --> S2[chatSession.js::invalidateQwenChatId]  %% S46: stale chat invalidation
     Q --> PP[pagePool.js]
     Q --> BR[browser.js::getBrowserContext]
 
@@ -145,7 +146,7 @@ flowchart LR
 |------|-----|-------|
 | routes.js | ~1030 | Main handler. Grew with agent-loop logic (S22, S42). Refactored from 2390 → current via S11-14 splits. |
 | qwenApi.js | ~1400 | Qwen API interaction: sendMessage, createChatV2, executeApiRequest variants |
-| chatSession.js | ~540 | Chat ID resolution/generation/normalization, session persistence, force-folding |
+| chatSession.js | ~600 | Chat ID resolution (S46 defaultResolved), invalidateQwenChatId, session persistence, force-folding |
 | pagePool.js | ~290 | Page lifecycle with health checks + GC timer (S13, S31) |
 | openaiUtils.js | ~400 | Message parsing, tool state detection, compact builder port from Python fork (S23) |
 | responseBuilders.js | ~260 | buildOpenAIToolResponse, writeToolCallsSse with chunk splitting (S29) |
