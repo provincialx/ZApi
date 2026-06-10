@@ -420,12 +420,12 @@ router.post("/chat/completions", async (req, res) => {
           streamingCallback = null; // Force non-streaming — atomic tool_call parsing
           const rawContent = result?.choices?.[0]?.message?.content;
           logDebug(
-            `[TOOL_PARSE] raw content first 200 chars: ${String(rawContent || "")
-              .substring(0, 200)
-              .replace(/\n/g, "\\n")}`
+            `[TOOL_PARSE] raw content length: ${String(rawContent || "").length}, type: ${typeof rawContent}`
           );
           logDebug(
-            `[TOOL_PARSE] raw content length: ${String(rawContent || "").length}, type: ${typeof rawContent}`
+            `[TOOL_PARSE] first 300 chars: ${String(rawContent || "")
+              .substring(0, 300)
+              .replace(/\n/g, "\\n")}`
           );
           parts = parseToolCallParts(rawContent);
           const rawCalls = parts.calls || [];
