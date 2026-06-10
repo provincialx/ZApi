@@ -59,7 +59,7 @@ function isCaptchaChallenge(errorBody) {
 
 /** Show headed browser for user to solve CAPTCHA, refresh token, then retry. */
 async function resolveCaptchaAndRetry(
-  browserContext,
+  _browserContext,
   messageContent,
   model,
   chatId,
@@ -80,7 +80,30 @@ async function resolveCaptchaAndRetry(
   console.log("------------------------------------------------------");
 
   try {
-    const captchaPage = await pagePool.getPage(browserContext);
+    // Shutdown headless browser and restart in VISIBLE mode so user can see CAPTCHA.
+    logInfo("Перезапуск браузера в видимом режиме для CAPTCHA...");
+    await shutdownBrowser();
+    await delay(2000);
+    await initBrowser(true); // visible = true
+    const newBrowserContext = getBrowserContext();
+
+    if (!newBrowserContext) {
+      console.log("Не удалось запустить браузер для CAPTCHA.");
+      return sendMessage(
+        messageContent,
+        model,
+        chatId,
+        parentId,
+        files,
+        tools,
+        toolChoice,
+        systemMessage,
+        retryCount + 1,
+        onChunk
+      );
+    }
+
+    const captchaPage = await pagePool.getPage(newBrowserContext);
     await captchaPage.goto(CHAT_PAGE_URL, {
       waitUntil: "domcontentloaded",
       timeout: PAGE_TIMEOUT,
@@ -111,6 +134,12 @@ async function resolveCaptchaAndRetry(
     }
 
     pagePool.releasePage(captchaPage);
+
+    // Restart headless browser for normal operation.
+    logInfo("Возвращаю браузер в фоновый режим...");
+    await shutdownBrowser();
+    await delay(2000);
+    await initBrowser(false); // visible = false (headless)
   } catch {
     console.log("CAPTCHA сессия завершена.");
   }
@@ -124,7 +153,7 @@ async function resolveCaptchaAndRetry(
     tools,
     toolChoice,
     systemMessage,
-    (retryCount || 0) + 1,
+    retryCount + 1,
     onChunk
   );
 }
