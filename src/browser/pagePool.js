@@ -15,7 +15,6 @@ import {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-
 /**
  * Safely closes a Puppeteer page, suppressing "Target closed" errors.
  * These occur when the CDP target is already gone (browser shutdown, crashed tab).
@@ -23,7 +22,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function safeClosePage(page) {
   try {
     if (page && !page.isClosed()) {
-      await safeClosePage(page);
+      await page.close();
     }
   } catch (e) {
     const msg = e?.message || "";

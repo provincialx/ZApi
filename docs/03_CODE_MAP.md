@@ -18,8 +18,13 @@ src/
 │   ├── responseBuilders.js         # SSE chunk construction: tool_call delivery, streaming fallback
 │   ├── qwenApi.js                  # Qwen API interaction: sendMessage, retry policy, error handling
 │   │   ├── buildPayloadV2() — construct /api/v2/chat/completions payload
-│   │   ├── executeApiRequest() — browser.evaluate fetch (SSE parsing)
-│   │   └── handleApiError() — classify & route errors to retry paths
+│   │   │   ├── parseNonSseCompletionBody() — detect ret[], code, captcha/overload in non-SSE 200 responses (S43)
+│   │   │   ├── executeApiRequest() — browser.evaluate fetch with reader timeout guard against stream hangs (S48)
+│   │   │   └── handleApiError() — classify & route errors to retry paths
+│   │   │       ├─ 401 → rotate token, retry
+│   │   │       ├─ 429 RateLimited → mark rate-limited, try next token
+│   │   │       ├─ 503 overload/CAPTCHA → trigger resolveCaptchaChallenge or backoff retry (S48)
+│   │   │       └─ generic → return error with details
 │   ├── chat.js                     # Token state + model/key loaders. Re-exports from qwenApi.js, pagePool.js
 │   ├── toolUtils.js                # Tool prompt injection & parseToolCallParts (JSON extraction)
 │   │   ├── toolsToPrompt() / toolsToLightPrompt() — full vs compact schema injection
@@ -29,7 +34,7 @@ src/
 │   ├── fileUpload.js               # Alibaba Cloud OSS upload via STS credentials
 │   ├── modelMapping.js             # External → internal model name mapping table
 │   ├── projectContext.js           # Anti-hallucination: FS scan → compact tree injected into system msg
-│   ├── tokenManager.js             # Token rotation, getTokenById(S47), status tracking
+│   ├── tokenManager.js             # Token rotation, account status tracking (OK/RATELIMIT/INVALID)
 │   └── timeoutWrapper.js           # withRequestTimeout() — Promise.race wrapper for REQUEST_TIMEOUT_MINUTES
 │
 ├── browser/                        # Puppeteer + Chromium management
@@ -38,7 +43,10 @@ src/
 │   │   ├── getPage() — acquire page from pool with evaluate timeout health check
 │   │   ├── releasePage() — return to pool or close if invalid
 │   │   └── _runGC() / _ensureGC() — lazy-started periodic GC at PAGE_GC_INTERVAL_MS (S31)
-│   ├── auth.js                     # Auth verification: checkAuthentication, checkVerification
+│   ├── auth.js                     # Auth verification + CAPTCHA resolution
+│   │   ├── checkAuthentication() — detect login needed, extract token after manual auth
+│   │   ├── checkVerification() — page-level verification prompt
+│   │   └── resolveCaptchaChallenge() — handle Qwen slider CAPTCHA by restarting Chromium headed (S48)
 │   └── session.js                  # Cookie/token extraction + persistence (localStorage via page.evaluate)
 │
 ├── logger/                         # Logging infrastructure
@@ -126,7 +134,6 @@ flowchart LR
     R --> TM[tokenManager.js]
 
     Q[qwenApi.js] --> C[chat.js::getAuthToken/setAuthToken]
-    Q --> S2[chatSession.js::invalidateQwenChatId]  %% S46: stale chat invalidation
     Q --> PP[pagePool.js]
     Q --> BR[browser.js::getBrowserContext]
 
@@ -145,8 +152,8 @@ flowchart LR
 | File | LOC | Notes |
 |------|-----|-------|
 | routes.js | ~1030 | Main handler. Grew with agent-loop logic (S22, S42). Refactored from 2390 → current via S11-14 splits. |
-| qwenApi.js | ~1430 | Qwen API interaction: sendMessage, createChatV2, resolveAuthToken(S47 ownership) |
-| chatSession.js | ~620 | Chat ID resolution, invalidateQwenChatId, chatTokenOwner Map (S47), session persistence |
+| qwenApi.js | ~1400 | Qwen API interaction: sendMessage, createChatV2, executeApiRequest variants |
+| chatSession.js | ~540 | Chat ID resolution/generation/normalization, session persistence, force-folding |
 | pagePool.js | ~290 | Page lifecycle with health checks + GC timer (S13, S31) |
 | openaiUtils.js | ~400 | Message parsing, tool state detection, compact builder port from Python fork (S23) |
 | responseBuilders.js | ~260 | buildOpenAIToolResponse, writeToolCallsSse with chunk splitting (S29) |

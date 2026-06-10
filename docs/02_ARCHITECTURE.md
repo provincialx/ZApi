@@ -164,8 +164,35 @@ flowchart TD
 | Error type | Strategy | Preserves parentId? | Preserves chatId? | Max attempts |
 |---|---|---|---|---|
 | `parent_id.*not exist` | Retry same chat, reset parentId to null | No (null) | Yes | 1 |
-| `chat_not_exist` / `/not exist/i` | Create new chat via createChatV2 **with same token**, parentId=null, gated by `retryCount === 0` | No (null) | No (new) | 1 |
+| `chat_not_exist` / `/not exist/i` | Create new chat via createChatV2, parentId=null | No (null) | No (new) | 1 |
+| HTTP 503 overload/CAPTCHA | Backoff retry (5s → 10s per attempt), same chat+parentId | Yes | Yes | MAX_RETRY_COUNT |
 | `"chat is in progress"` | Wait + retry **same** chat with same parentId | Yes | Yes | 3, then escalate to new-chat fallback |
-| `FAIL_SYS_USER_VALIDATE` (CAPTCHA) | Show visible browser, wait for user Enter, then retry once | Yes | Yes | 1 |
+| `FAIL_SYS_USER_VALIDATE` (CAPTCHA) | Show visible browser, wait for user Enter, restart headless, retry same request preserving parentId + chatId | Yes | Yes | 2 |
+
+## CAPTCHA resolution flow (S48)
+
+Qwen added a slider CAPTCHA (`FAIL_SYS_USER_VALIDATE`) that returns HTTP 200 with JSON error body containing `"action=captcha&punchCpatcha="...`. The response may claim `content-type: text/event-stream` but send either:
+1. Immediate JSON error (detected via non-SSE parser)
+2. Empty stream that blocks forever — reader would hang for 60s until CDP timeout, deadlocking the page pool
+
+**Detection:** `parseNonSseCompletionBody()` detects `ret["FAIL_SYS_USER_VALIDATE"]` or `/captcha|punish/i` in body → maps to HTTP 503.
+
+**Resolution (first attempt only):**
+1. `handleApiError(503)` calls `resolveCaptchaChallenge()` from `auth.js`
+2. Chromium restarts in **visible headed mode**
+3. Opens `chat.qwen.ai` page where slider CAPTCHA appears
+4. User drags slider, waits for Enter prompt
+5. Token + session saved → browser restarts headless → original request retries with fresh token
+6. If resolver already running or fails → fallback to 2 backoff attempts (5s/10s) before final error.
+
+**Guard against loops:** `_captchaResolverRunning` flag prevents multiple concurrent CAPTCHA resolvers from infinite-restarting Chromium.
+
+## Stream reader hang prevention (S48)
+
+Qwen sometimes sends `text/event-stream` header but holds connection open or returns empty stream when overload protection triggers. Reader in `page.evaluate()` blocks CDP for 1 minute, deadlocking the page pool.
+
+**Fix:** All SSE reader loops now use `Promise.race(reader.read(), timeout)` with a 5s first-chunk deadline and per-chunk timeouts. If no chunk arrives:
+- Node path: falls back to body re-parse as JSON error → status 503
+- Browser evaluate path: exits loop with accumulated content or triggers CAPTCHA resolver
 
 S42 fix: "in progress" retries wait 2s/4s before re-sending to the SAME chat. Only falls back to creating a new chat after all same-chat retries exhausted. Old behavior created a fresh chat immediately which broke tool-calling context continuity.
