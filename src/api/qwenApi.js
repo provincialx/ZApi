@@ -805,6 +805,19 @@ export async function sendMessage(
 
     logInfo("Отправка запроса к API v2...");
 
+    // CAPTCHA simulation: return fake error BEFORE actual request to test resolver e2e.
+    // Fires once per process, only on first call (retryCount === 0).
+    const simulateCaptcha =
+      process.env.SIMULATE_CAPTCHA === "true" && !_captchaSimulated && retryCount === 0;
+
+    if (simulateCaptcha) {
+      _captchaSimulated = true;
+      logInfo("[СИМУЛЯЦИЯ] CAPTCHA — пропускаю реальный запрос, запускаю resolver");
+      pagePool.releasePage(page);
+      page = null;
+      return { success: false, isCaptcha: true };
+    }
+
     const payload = buildPayloadV2(
       messageContent,
       model,
@@ -841,34 +854,20 @@ export async function sendMessage(
       // Debug: log response keys to understand what path is used
       logInfo(`[ERR] keys=${Object.keys(response).join(",")} status=${response.status}`);
 
-      // CAPTCHA simulation: fires once per process to test resolver without waiting for Qwen.
-      const simulateCaptcha =
-        process.env.SIMULATE_CAPTCHA === "true" && !_captchaSimulated && retryCount === 0;
-
       // ── CAPTCHA detection (FAIL_SYS_USER_VALIDATE) ─────────────────────
       if (
-        simulateCaptcha ||
         response.isCaptcha ||
         (response.errorBody && String(response.errorBody).includes("FAIL_SYS_USER_VALIDATE"))
       ) {
         console.log("\n------------------------------------------------------");
-        const captchaLabel = simulateCaptcha
-          ? "[СИМУЛЯЦИЯ] ЗАПРОШЕНА КАПЧА"
-          : "ЗАПРОШЕНА КАПЧА (CAPTCHA)";
-        console.log(`              ⚠️  ${captchaLabel}`);
+        console.log(`              ⚠️  ЗАПРОШЕНА КАПЧА (CAPTCHA)`);
         console.log("------------------------------------------------------");
-        if (simulateCaptcha)
-          console.log(
-            "Тестовый режим. Браузер откроется в headed-режиме, нажмите ENTER для имитации прохождения капчи."
-          );
-        else
-          console.log(
-            "Qwen запросил CAPTCHA из-за подозрительной активности.\nОткройте браузер, решите капчу, затем нажмите ENTER в консоли."
-          );
+        console.log(
+          "Qwen запросил CAPTCHA из-за подозрительной активности.\nОткройте браузер, решите капчу, затем нажмите ENTER в консоли."
+        );
         console.log("------------------------------------------------------");
 
         try {
-          if (simulateCaptcha) _captchaSimulated = true;
           const captchaPage = await pagePool.getPage(browserContext);
           await captchaPage.goto(CHAT_PAGE_URL, {
             waitUntil: "domcontentloaded",
