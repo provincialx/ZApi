@@ -82,9 +82,23 @@ async function resolveCaptchaAndRetry(
   try {
     logInfo("Перезапуск браузера в видимом режиме для CAPTCHA...");
 
-    // Save cookies BEFORE shutdown — Puppeteer can restore them in new instance.
-    const savedCookies = await _browserContext.cookies();
-    logInfo(`Сохранено ${savedCookies.length} куков перед перезапуском`);
+    // Qwen relies on localStorage JWT for session, not HTTP cookies. Save it now before shutdown wipes state.
+    const savedToken = getAuthToken();
+    if (!savedToken) {
+      console.log("ОШИБКА: Токен отсутствует, невозможно восстановить сессию для CAPTCHA");
+      return sendMessage(
+        messageContent,
+        model,
+        chatId,
+        parentId,
+        files,
+        tools,
+        toolChoice,
+        systemMessage,
+        retryCount + 1,
+        onChunk
+      );
+    }
 
     // Shutdown headless and start visible browser WITHOUT manual auth prompt.
     await shutdownBrowser();
@@ -108,15 +122,7 @@ async function resolveCaptchaAndRetry(
       );
     }
 
-    // Restore cookies to the new browser context.
-    if (savedCookies.length > 0) {
-      logInfo(`Восстановление ${savedCookies.length} куков в видимом браузере...`);
-      await visibleContext.setCookie(...savedCookies);
-      const restored = await visibleContext.cookies();
-      logInfo(`Куки восстановлены (${restored.length})`);
-    }
-
-    // Open CAPTCHA page and verify auth.
+    // Open CAPTCHA page and inject saved auth token.
     const captchaPage = await pagePool.getPage(visibleContext);
     try {
       await captchaPage.goto(CHAT_PAGE_URL, {
@@ -124,13 +130,20 @@ async function resolveCaptchaAndRetry(
         timeout: PAGE_TIMEOUT,
       });
 
-      // Check if token is present in localStorage after cookie restore.
-      const hasToken = await captchaPage.evaluate(() => !!localStorage.getItem("token"));
-      if (hasToken) logInfo("Сессия восстановлена — пользователь авторизован");
-      else logWarn("Токен не найден в localStorage после восстановления куков");
+      // Qwen checks localStorage["token"] for login state. Write our saved JWT there.
+      const injected = await captchaPage.evaluate((t) => {
+        localStorage.setItem("token", t);
+        return localStorage.getItem("token") === t;
+      }, savedToken);
+
+      if (injected) logInfo(`Токен успешно восстановлен в браузере`);
+      else logWarn("Не удалось записать токен в браузер");
     } catch (e) {
-      logWarn(`Не удалось загрузить страницу CAPTCHA: ${e.message}`);
+      logWarn(`Ошибка при открытии страницы CAPTCHA: ${e.message}`);
     }
+
+    // Brief pause for Qwen to process the token and update UI.
+    await delay(1000);
 
     console.log("\nПосле прохождения CAPTCHA нажмите ENTER...");
     await new Promise((resolve) => {
