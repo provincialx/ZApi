@@ -479,14 +479,6 @@ async function executeApiRequestWithNodeStreaming(
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
-        // Early WAF/CAPTCHA detection — Qwen may send aliyun_waf HTML claiming text/event-stream.
-        // Check the raw buffer before SSE parsing to catch disguised responses immediately.
-        if (!hasStreamedChunks && isCaptchaChallenge(buffer)) {
-          streamError = { status: 503, errorBody: buffer };
-          finished = true;
-        }
-
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
 
@@ -539,9 +531,9 @@ async function executeApiRequestWithNodeStreaming(
       }
     } finally {
       clearTimeout(slowTimer);
-      // Cancel reader only if stream not naturally finished — avoid TypeError: terminated on Qwen empty streams.
+      // Cancel reader gracefully — Qwen stream may already be done.
       try {
-        if (!finished && !streamError) await reader.cancel();
+        await reader.cancel().catch(() => {});
       } catch {}
     }
 
@@ -549,15 +541,8 @@ async function executeApiRequestWithNodeStreaming(
       return { success: false, ...streamError, hasStreamedChunks };
     }
 
-    // WAF/CAPTCHA can arrive disguised as SSE with no valid chunks — detect in accumulated buffer.
-    if (!hasStreamedChunks && (fullContent || buffer) && isCaptchaChallenge(fullContent + buffer)) {
-      logWarn("🟡 WAF detected in SSE stream buffer → browser fallback");
-      return { success: false, isCaptcha: true, errorBody: fullContent + buffer };
-    }
-
-    // Guard against empty stream that finished via slowTimer — no useful data received.
+    // Empty stream guard — slowTimer fired with no content received.
     if (!hasStreamedChunks && !fullContent) {
-      logWarn("SSE completed with zero content chunks");
       return { success: false, error: "Empty SSE response", hasStreamedChunks };
     }
 
