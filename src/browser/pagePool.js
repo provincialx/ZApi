@@ -165,10 +165,17 @@ const pagePool = {
       }
     }
 
-    // Enforce hard limit on active pages
-    while (this.activeCount >= MAX_ACTIVE_PAGES) {
+    // Enforce hard limit on active pages — fail after 10s instead of blocking forever
+    const waitDeadline = Date.now() + 10_000;
+    while (this.activeCount >= MAX_ACTIVE_PAGES && Date.now() < waitDeadline) {
       logWarn(`🔒 Active page limit reached (${MAX_ACTIVE_PAGES}), waiting for page release...`);
       await delay(500);
+    }
+
+    if (this.activeCount >= MAX_ACTIVE_PAGES) {
+      throw new Error(
+        `Page pool exhausted: ${MAX_ACTIVE_PAGES} pages active, timeout after 10s. Increase MAX_ACTIVE_PAGES env var.`
+      );
     }
 
     const baseContext = getBrowserContext();
@@ -206,6 +213,14 @@ const pagePool = {
     for (let attempt = 1; attempt <= maxGotoAttempts; attempt++) {
       try {
         const newPage = await createPage(context);
+
+        // Bypass CSP — Qwen Studio blocks XMLHttpRequest/fetch via Content-Security-Policy headers.
+        // Without this, all XHR in evaluate() throws "XHR network error" even with valid auth.
+        try {
+          await newPage.setBypassCSP("all");
+        } catch {
+          /* ignore if page already closed */
+        }
 
         // Ensure fresh page inherits browser-level cookies from base context.
         // New pages created via browser.newPage() SHOULD inherit, but race conditions or restarts can leave them empty.
