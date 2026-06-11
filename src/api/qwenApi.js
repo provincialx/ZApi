@@ -611,13 +611,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
 
         const browserOrigin = typeof location !== "undefined" ? location.origin : "unknown";
 
-        // AbortController: kill fetch() itself if it hangs >120s. Prevents indefinite CDP lock.
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => {
-          controller.abort();
-        }, 120_000);
-
-        // Use relative URL to keep same-origin — Qwen requires cookies from session.
+        // Use relative URL for same-origin XHR — Qwen sends cookies automatically.
         // If data.apiUrl is absolute (https://chat.qwen.ai/...), extract just path+query.
         let fetchUrl = data.apiUrl;
         if (fetchUrl.startsWith("http")) {
@@ -651,14 +645,17 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
           };
 
           xhr.onerror = () => reject(new Error("XHR network error"));
-          xhr.ontimeout = () => controller.abort();
 
-          setTimeout(() => {
+          // Timeout guard: abort if XHR still pending after 120s.
+          const timeoutGuard = setTimeout(() => {
             if (xhr.readyState < 4) {
               xhr.abort();
               reject(new DOMException("Timeout", "AbortError"));
             }
-          }, 120_000).finally(() => clearTimeout(timeoutId));
+          }, 120_000);
+
+          // Always clear guard on completion.
+          xhr.onloadend = () => clearTimeout(timeoutGuard);
 
           xhr.send(JSON.stringify(data.payload));
         });
