@@ -1,4 +1,5 @@
-!Temporaly not working, captcha trouble!
+# ⚠ Qwen temporaly not working, captcha trouble! ⚠
+  Working on DeepSeek integration.
 
 # FreeQwenApi — Documentation Index
 
