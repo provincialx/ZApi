@@ -552,7 +552,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
 
         // Internal AbortController so browser fetch doesn't hang forever on slow Qwen responses.
         const abortCtrl = new AbortController();
-        setTimeout(() => abortCtrl.abort(), data.apiTimeoutMs);
+        window.setTimeout(() => abortCtrl.abort(), data.apiTimeoutMs);
 
         const response = await fetch(data.apiUrl, {
           method: "POST",
@@ -850,6 +850,18 @@ export async function sendMessage(
   let page = null;
   try {
     page = await pagePool.getPage(browserContext);
+
+    // Ensure page is on Qwen domain — browser fetch fails if context mismatches origin.
+    try {
+      await evaluateWithTimeout(page, () => document.location.host === "chat.qwen.ai");
+    } catch (e) {
+      logDebug(`Page not on chat.qwen.ai (${e.message}), navigating...`);
+    }
+
+    const currentHost = await page.evaluate(() => location.hostname);
+    if (currentHost !== "chat.qwen.ai") {
+      await page.goto(CHAT_PAGE_URL, { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT });
+    }
 
     const verificationNeeded = await checkVerification(page);
     if (verificationNeeded) {
