@@ -4,7 +4,7 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { saveSession, saveAuthToken } from "./session.js";
 import { startManualAuthentication } from "./auth.js";
 import { pagePool } from "./pagePool.js";
-import { getAuthToken } from "../api/chat.js";
+import { getAuthToken, setAuthToken as chatSetToken } from "../api/chat.js";
 import fs from "fs";
 import path from "path";
 import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
@@ -151,6 +151,64 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
     browserContext = page;
     logInfo("Браузер инициализирован с максимальной защитой от обнаружения");
 
+    // Auto-restore session on headless init — pool pages need cookies for fetch() inside evaluate.
+    if (!visibleMode) {
+      const { loadAuthToken, hasSession } = await import("./session.js");
+      const savedToken = loadAuthToken();
+
+      try {
+        if (savedToken && !getAuthToken()) {
+          logInfo("Восстановлен сохраненный токен авторизации при запуске");
+          chatSetToken(savedToken);
+          saveAuthToken(savedToken);
+        }
+
+        // Restore cookies from the most recent account session file.
+        const accountsDir = path.join(process.cwd(), SESSION_DIR, ACCOUNTS_DIR);
+        if (fs.existsSync(accountsDir) && hasSession()) {
+          try {
+            const accDirs = fs.readdirSync(accountsDir).filter((d) => d.startsWith("acc_"));
+            let restoredCookies = false;
+            for (const dir of accDirs.sort().reverse()) {
+              // newest first
+              const cookieFile = path.join(accountsDir, dir, "cookies.json");
+              if (fs.existsSync(cookieFile)) {
+                try {
+                  const cookies = JSON.parse(fs.readFileSync(cookieFile, "utf8"));
+                  await page.setCookie(...cookies);
+                  logInfo(`Восстановлено ${cookies.length} cookies из сессии ${dir}`);
+                  restoredCookies = true;
+                  break;
+                } catch {
+                  /* skip corrupted file */
+                }
+              }
+            }
+            if (!restoredCookies) {
+              logWarn("Файлы cookies найдены но не удалось восстановить");
+            }
+          } catch (e) {
+            logWarn(`Ошибка при чтении директории аккаунтов: ${e.message}`);
+          }
+        }
+
+        // Navigate to Qwen so cookies/localStorage take effect for subsequent pool pages.
+        await page.goto(CHAT_PAGE_URL, {
+          waitUntil: "domcontentloaded",
+          timeout: NAVIGATION_TIMEOUT,
+        });
+        await delay(RETRY_DELAY);
+
+        const existing = await page.evaluate(() => localStorage.getItem("token"));
+        if (savedToken && existing !== savedToken) {
+          logInfo("Токен синхронизирован в localStorage fresh страницы");
+          await page.evaluate((t) => localStorage.setItem("token", t), savedToken);
+        }
+      } catch (e) {
+        logWarn(`Не удалось восстановить сессию при запуске: ${e.message}`);
+      }
+    }
+
     // When CAPTCHA resolver calls initBrowser(true, true), it handles auth itself.
     // skipManualRestart=true means: "don't run manual auth flow". We only need visible browser.
     if (visibleMode && !skipManualRestart) {
@@ -271,9 +329,32 @@ export async function restartBrowserInHeadlessMode() {
     saveAuthToken(token);
     await delay(1000);
   }
+
+  // Save cookies BEFORE shutdown so we can restore after fresh browser launch.
+  // Without this, headless restart loses session → fetch() fails in pool pages.
+  const savedCookies = await saveBrowserCookies();
+  logDebug(`Сохранено ${savedCookies?.length || 0} cookies перед перезапуском`);
+
   await shutdownBrowser();
   await delay(RETRY_DELAY);
-  const success = await initBrowser(false);
+
+  // Restore saved auth-token to the new browser context first.
+  if (token) chatSetToken(token);
+  const success = await initBrowser(false, true); // skipManualAuth — no interactive login needed
+  if (!success) return;
+
+  // Restore cookies and validate session on base page.
+  const basePage = getBrowserContext();
+  if (basePage && savedCookies?.length > 0) {
+    await restoreBrowserCookies(basePage, savedCookies);
+    // Navigate to Qwen so cookies take effect + localStorage populated
+    await basePage.goto(CHAT_PAGE_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: NAVIGATION_TIMEOUT,
+    });
+    await delay(RETRY_DELAY);
+  }
+
   logInfo(success ? "Браузер перезапущен в фоновом режиме" : "Ошибка при перезапуске браузера");
 }
 

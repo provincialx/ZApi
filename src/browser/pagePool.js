@@ -113,6 +113,16 @@ export async function evaluateInBrowser(page, fn, args = [], timeoutMs = longTim
  */
 let _getPageCallCount = 0;
 
+/** Get cookies from the base auth page. Returns empty array if no context available. */
+async function getBaseContextCookies() {
+  const baseCtx = getBrowserContext();
+  try {
+    return (await baseCtx.cookies(CHAT_PAGE_URL)) || [];
+  } catch {
+    return [];
+  }
+}
+
 const pagePool = {
   pages: [], // { page, lastUsed } entries
   maxSize: PAGE_POOL_SIZE,
@@ -196,6 +206,24 @@ const pagePool = {
     for (let attempt = 1; attempt <= maxGotoAttempts; attempt++) {
       try {
         const newPage = await createPage(context);
+
+        // Ensure fresh page inherits browser-level cookies from base context.
+        // New pages created via browser.newPage() SHOULD inherit, but race conditions or restarts can leave them empty.
+        const baseCookies = await getBaseContextCookies();
+        if (baseCookies?.length > 0) {
+          try {
+            const newPageCookies = await newPage.cookies(CHAT_PAGE_URL);
+            if (newPageCookies.length === 0) {
+              logDebug(
+                `Fresh page missing cookies, restoring ${baseCookies.length} from base context`
+              );
+              await newPage.setCookie(...baseCookies);
+            }
+          } catch {
+            /* ignore — cookie operations can fail on fresh pages */
+          }
+        }
+
         await newPage.goto(CHAT_PAGE_URL, {
           waitUntil: "domcontentloaded",
           timeout: PAGE_TIMEOUT,
