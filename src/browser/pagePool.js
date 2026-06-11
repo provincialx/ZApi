@@ -72,14 +72,14 @@ export async function createPage(context) {
 // ─── Evaluate with timeout helper ────────────────────────────────────────────
 // page.evaluate без таймаута блокирует пул страниц бесконечно.
 // Promise.race выбрасывает Error если CDP-соединение деградировало.
+// fast sync check
 export const EVALUATE_HEALTH_TIMEOUT = Number(process.env.EVALUATE_HEALTH_TIMEOUT) || 5_000;
+// slow async API calls can take minutes — give plenty of room (default: REQUEST_TIMEOUT * 2)
+const longTimeout = Math.max(
+  Number(process.env.REQUEST_TIMEOUT_MINUTES) * 60_000 + 30_000,
+  180_000
+);
 
-/**
- * Wraps page.evaluate() with a timeout via Promise.race.
- * Prevents CDP-dead pages from blocking the pool forever.
- *
- * @param {number} timeoutMs - milliseconds before timeout (default: EVALUATE_HEALTH_TIMEOUT)
- */
 export async function evaluateWithTimeout(page, fn, timeoutMs = EVALUATE_HEALTH_TIMEOUT) {
   return Promise.race([
     page.evaluate(fn),
@@ -89,11 +89,7 @@ export async function evaluateWithTimeout(page, fn, timeoutMs = EVALUATE_HEALTH_
   ]);
 }
 
-/**
- * Like evaluateWithTimeout, but forwards arguments to the evaluated function.
- * page.evaluate(fn, arg1, arg2) → evaluateInBrowser(page, fn, [arg1, arg2])
- */
-export async function evaluateInBrowser(page, fn, args = [], timeoutMs = EVALUATE_HEALTH_TIMEOUT) {
+export async function evaluateInBrowser(page, fn, args = [], timeoutMs = longTimeout) {
   return Promise.race([
     page.evaluate(fn, ...args),
     new Promise((_, reject) =>
