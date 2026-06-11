@@ -545,18 +545,103 @@ async function executeApiRequestWithNodeStreaming(
   }
 }
 
-// Use Node.js fetch with browser cookies to bypass WAF and avoid CDP timeouts.
+// Aliyun WAF blocks pure Node.js fetch. Must run INSIDE browser context.
+// protocolTimeout is set to 15+ min in browser.js so long SSE streams don't break the CDP link.
 async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
   logDebug(`Используем токен: ${token ? "Токен существует" : "Токен отсутствует"}`);
   logDebug(`API URL: ${apiUrl}`);
 
-  // Get browser cookies to satisfy WAF session check.
-  const cookies = await page.cookies();
-  const cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+  const apiTimeoutMs = Math.max(REQUEST_TIMEOUT_MINUTES * 60_000 + 30_000, 180_000);
+  const requestBody = { apiUrl, payload, token };
 
-  if (typeof fetch === "function") {
-    return executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChunk, cookieStr);
-  }
+  return evaluateInBrowser(
+    page,
+    async (data) => {
+      try {
+        if (!data.token) return { success: false, error: "Токен авторизации не найден" };
+
+        const response = await fetch(data.apiUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${data.token}`,
+            Accept: "*/*",
+          },
+          body: JSON.stringify(data.payload),
+        });
+
+        if (response.ok) {
+          const contentType = response.headers.get("content-type") || "";
+          if (!contentType.includes("text/event-stream")) {
+            return parseNonSseCompletionBody(await response.text());
+          }
+
+          // SSE stream inside browser. Must collect fully because CDP is locked during this.
+          const reader = response.body?.getReader();
+          if (reader) {
+            let buffer = "",
+              fullContent = "",
+              responseId,
+              usage,
+              finished = false;
+
+            while (!finished) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += new TextDecoder().decode(value, { stream: true });
+              for (const line of buffer.split("\n")) {
+                buffer = line.substring(line.lastIndexOf("\n") + 1);
+                const jsonStr = line.replace(/^data:\s?/, "").trim();
+                if (!jsonStr || jsonStr === "[DONE]") {
+                  if (jsonStr === "[DONE]") finished = true;
+                  continue;
+                }
+                try {
+                  const chunk = JSON.parse(jsonStr);
+                  if (chunk["response.created"]) responseId = chunk["response.created"].response_id;
+                  const delta = chunk.choices?.[0]?.delta;
+                  if (delta?.content) fullContent += delta.content;
+                  if (delta?.status === "finished") finished = true;
+                  if (chunk.usage) usage = chunk.usage;
+                } catch {}
+              }
+            }
+
+            return {
+              success: true,
+              isTask: false,
+              data: {
+                id: responseId || `chatcmpl-${Date.now()}`,
+                object: "chat.completion",
+                created: Math.floor(Date.now() / 1000),
+                model: data.payload.model,
+                choices: [
+                  {
+                    index: 0,
+                    message: { role: "assistant", content: fullContent },
+                    finish_reason: "stop",
+                  },
+                ],
+                usage: usage || {
+                  prompt_tokens: 0,
+                  completion_tokens: 0,
+                  total_tokens: 0,
+                },
+              },
+            };
+          }
+        }
+
+        const errorBody = await response.text();
+        return { success: false, status: response.status, errorBody };
+      } catch (error) {
+        if (error?.name === "AbortError") return { success: false, error: `API request timed out` };
+        return { success: false, error: error.toString() };
+      }
+    },
+    [requestBody],
+    apiTimeoutMs
+  );
 }
 
 async function handleApiError(

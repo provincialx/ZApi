@@ -52,12 +52,12 @@ export async function initBrowser(visibleMode = true, skipManualRestart = false)
       headless: !visibleMode,
       slowMo: visibleMode ? 30 : 0,
       executablePath: process.env.CHROME_PATH || undefined,
-      // Protocol timeout exceeds REQUEST_TIMEOUT by a buffer so CDP doesn't fire
-      // before the external request times out. Default: max(env, 8min). Keeping this <<
-      // prevents zombie promises from blocking page pool slots indefinitely.
+      // Protocol timeout MUST exceed max Qwen generation time. Aliyun WAF forces us
+      // to run fetch() INSIDE browser context, which locks the CDP channel during long SSE.
+      // Default: max(env, 15min). If this fires during a generation, it means the model hung.
       protocolTimeout:
         Number(process.env.PROTOCOL_TIMEOUT) ||
-        (Number(process.env.REQUEST_TIMEOUT_MINUTES) || 3 + 5) * 60_000,
+        (Number(process.env.REQUEST_TIMEOUT_MINUTES) || 3 + 5) * 60_000 * 2,
       args: chromeArgs,
       defaultViewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
       ignoreHTTPSErrors: true,
