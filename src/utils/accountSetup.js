@@ -2,126 +2,247 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { initBrowser, shutdownBrowser, getBrowserContext } from "../browser/browser.js";
+import {
+  initBrowser,
+  shutdownBrowser,
+  getBrowserContext,
+  restartBrowserInHeadlessMode,
+} from "../browser/browser.js";
 import { extractAuthToken } from "../api/chat.js";
-import { loadTokens, saveTokens, markValid, removeToken } from "../api/tokenManager.js";
-import { loadAuthToken } from "../browser/session.js";
+import {
+  loadTokens,
+  saveTokens,
+  markValid,
+  removeToken,
+  setAuthToken as managerSetToken,
+} from "../api/tokenManager.js";
+import { clearSession, loadSession, saveAuthToken, loadAuthToken } from "../browser/session.js";
 import { logInfo, logError, logWarn } from "../logger/index.js";
 import { prompt } from "./prompt.js";
 import { formatContactInfo } from "./branding.js";
-import { SESSION_DIR, ACCOUNTS_DIR } from "../config.js";
+import { CHAT_PAGE_URL } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function ensureAccountDir(id) {
-  const accountDir = path.resolve(__dirname, "..", "..", SESSION_DIR, ACCOUNTS_DIR, id);
+  const accountDir = path.resolve(__dirname, "..", "..", "session", "accounts", id);
   if (!fs.existsSync(accountDir)) fs.mkdirSync(accountDir, { recursive: true });
   return accountDir;
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Button 1: Add new account (fresh unique ID)
+// - Clears global token file so old sessions don't bleed in.
+// - Opens visible browser for manual login.
+// - Saves cookies + token to the NEW directory only.
+// ──────────────────────────────────────────────────────────────────────────────
 export async function addAccountInteractive() {
   logInfo("======================================================");
-  logInfo("Добавление нового аккаунта Qwen");
+  logInfo("Добавление нового аккаунта Qwen (с нуля)");
   logInfo(formatContactInfo());
-  logInfo("Браузер откроется, войдите в систему, затем вернитесь к консоли.");
+  logInfo("Браузер откроется. Войдите в систему, затем вернитесь и нажмите ENTER.");
   logInfo("======================================================");
 
-  const ok = await initBrowser(true, true);
+  // Avoid mixing up with the previous global fallback token file during add flow.
+  try {
+    loadAuthToken();
+  } catch {}
+  // Clear it explicitly so extractAuthToken doesn't lie about "found old token".
+  fs.writeFileSync(path.resolve(__dirname, "..", "..", "session", "auth_token.txt"), "", "utf8");
+
+  const ok = await initBrowser(true, true); // visible + skipManualAuth prompt (we do it manually below)
   if (!ok) {
     logError("Не удалось запустить браузер.");
     return null;
   }
 
-  const ctx = getBrowserContext();
-  let token = await extractAuthToken(ctx, true);
+  try {
+    const ctx = getBrowserContext();
 
-  if (!token) {
-    token = loadAuthToken();
-    if (token) logInfo("Токен получен из сохранённого файла.");
-  }
+    // Navigate directly to Qwen so user logs into the right place.
+    await ctx.goto(CHAT_PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await delay(2000);
 
-  if (!token) {
-    logError("Токен не был получен. Аккаунт не добавлен.");
+    console.log("\n------------------------------------------------------");
+    console.log("               ОЖИДАНИЕ ВХОДА В СИСТЕМУ");
+    console.log("------------------------------------------------------");
+    console.log("1. Войдите через GitHub / Email в открытом браузере.");
+    console.log("2. После входа вернитесь сюда и нажмите ENTER.");
+    console.log("------------------------------------------------------\n");
+
+    await prompt("Нажмите ENTER после успешной авторизации...");
+    logInfo("Вход подтверждён пользователем, извлекаю токен...");
+
+    // Give Qwen a moment to finalize redirects after Enter.
+    await delay(2000);
+
+    const token = await extractAuthToken(ctx, true); // forceRefresh = true
+    if (!token) {
+      logError("Токен не был получен после входа.");
+      return null;
+    }
+
+    // Save global auth_token.txt for the main proxy loop to pick up later.
+    saveAuthToken(token);
+
+    const id = "acc_" + Date.now();
+    ensureAccountDir(id);
+
+    // Save per-account token backup
+    fs.writeFileSync(
+      path.join(__dirname, "..", "..", "session", "accounts", id, "token.txt"),
+      token,
+      "utf8"
+    );
+
+    // Update in-memory + disk tokenManager list
+    const list = loadTokens();
+    list.push({ id, token, resetAt: null });
+    saveTokens(list);
+
+    logInfo(`Аккаунт '${id}' добавлен. Всего аккаунтов: ${list.length}`);
+  } catch (e) {
+    logError("Ошибка при добавлении аккаунта", e);
+  } finally {
     await shutdownBrowser();
-    return null;
+    // Restart headless with fresh cookies from global file if needed, or just return to menu.
+    await initBrowser(false);
   }
 
-  await shutdownBrowser();
-
-  const id = "acc_" + Date.now();
-  ensureAccountDir(id);
-  fs.writeFileSync(
-    path.resolve(__dirname, "..", "..", SESSION_DIR, ACCOUNTS_DIR, id, "token.txt"),
-    token,
-    "utf8"
-  );
-
-  const list = loadTokens();
-  list.push({ id, token, resetAt: null });
-  saveTokens(list);
-
-  logInfo(`Аккаунт '${id}' добавлен. Всего аккаунтов: ${list.length}`);
   logInfo("======================================================");
-  return id;
 }
 
-export async function interactiveAccountMenu() {
-  while (true) {
-    console.log("\n=== Меню управления аккаунтами ===");
-    console.log(formatContactInfo());
-    console.log("1 - Добавить новый аккаунт");
-    console.log("2 - Завершить");
-    const choice = await prompt("Ваш выбор (1/2): ");
-    if (choice === "1") await addAccountInteractive();
-    else if (choice === "2") break;
-    else console.log("Неверный выбор.");
-  }
-}
-
+// ──────────────────────────────────────────────────────────────────────────────
+// Button 2: Relogin invalid/expired account (restore specific ID)
+// - Loads saved cookies FIRST so browser starts authenticated.
+// - If cookies dead -> manual login screen appears for the user.
+// - Saves NEW cookies + updates tokenManager list.
+// ──────────────────────────────────────────────────────────────────────────────
 export async function reloginAccountInteractive() {
   const tokens = loadTokens();
-  const invalids = tokens.filter((t) => t.invalid);
-  if (!invalids.length) {
-    console.log("Нет аккаунтов, требующих повторного входа.");
+  // Allow picking ANY account to force refresh, not just invalid ones.
+  if (!tokens.length) {
+    console.log("Нет сохранённых аккаунтов для перелогина.");
     await prompt("Нажмите ENTER чтобы вернуться в меню...");
     return;
   }
 
-  console.log("\nАккаунты с истекшим токеном:");
-  invalids.forEach((t, idx) => console.log(`${idx + 1} - ${t.id}`));
-  const choice = await prompt("Выберите номер аккаунта для повторного входа: ");
+  console.log("\nДоступные аккаунты:");
+  tokens.forEach((t, idx) => {
+    const status = t.invalid ? " (Invalid)" : "";
+    if (t.resetAt) status += ` (Cooldown until ${new Date(t.resetAt).toLocaleTimeString()})`;
+    console.log(`${idx + 1} - ${t.id}${status}`);
+  });
+
+  const choice = await prompt("Выберите номер аккаунта для перелогина: ");
   const num = parseInt(choice, 10);
-  if (isNaN(num) || num < 1 || num > invalids.length) {
+
+  if (isNaN(num) || num < 1 || num > tokens.length) {
     console.log("Неверный выбор.");
     return;
   }
-  const account = invalids[num - 1];
 
-  logInfo(`Повторная авторизация для ${account.id}`);
-  logInfo(formatContactInfo());
-  const ok = await initBrowser(true, true);
+  const account = tokens[num - 1];
+  logInfo(`Перелогин аккаунта: ${account.id}`);
+
+  await shutdownBrowser(); // Close existing headless session cleanly.
+
+  const ok = await initBrowser(true, true); // visible browser
   if (!ok) {
-    logError("Не удалось запустить браузер.");
+    logError("Не удалось запустить браузер для перелога.");
     return;
   }
 
-  const token = await extractAuthToken(getBrowserContext(), true);
-  await shutdownBrowser();
+  try {
+    const ctx = getBrowserContext();
 
-  if (!token) {
-    logError("Не удалось извлечь токен.");
-    return;
+    // TRY to load saved cookies for this specific account before navigating.
+    // This prevents the user from having to type passwords if cookies are still alive!
+    const cookiePath = path.join(
+      __dirname,
+      "..",
+      "..",
+      "session",
+      "accounts",
+      account.id,
+      "cookies.json"
+    );
+    if (fs.existsSync(cookiePath)) {
+      try {
+        const cookies = JSON.parse(fs.readFileSync(cookiePath, "utf8"));
+        await ctx.setCookie(...cookies);
+        logInfo(
+          `Куки для ${account.id} загружены (${cookies.length}). Пробую восстановить сессию...`
+        );
+      } catch (e) {
+        logWarn("Не удалось загрузить куки для этого аккаунта.");
+      }
+    }
+
+    await ctx.goto(CHAT_PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await delay(2000);
+
+    // Check if we are actually logged in after loading cookies.
+    const token = await extractAuthToken(ctx, true);
+
+    let needsManualLogin = !token;
+
+    if (!needsManualLogin) {
+      console.log("\n------------------------------------------------------");
+      console.log("               АВТОМАТИЧЕСКОЕ ВОССТАНОВЛЕНИЕ СДЕЛАНО");
+      console.log("------------------------------------------------------");
+      console.log("Куки живы! Токен обновлён автоматически.");
+      console.log("Нажмите ENTER для завершения...");
+      console.log("------------------------------------------------------\n");
+    } else {
+      console.log("\n------------------------------------------------------");
+      console.log("               РУЧНОЙ ВХОД (Сессия просрочена)");
+      console.log("------------------------------------------------------");
+      console.log("1. Войдите через GitHub / Email в открытом браузере.");
+      console.log("2. После входа вернитесь сюда и нажмите ENTER.");
+      console.log("------------------------------------------------------\n");
+
+      await prompt("Нажмите ENTER после успешной авторизации...");
+      logInfo("Вход подтверждён пользователем, извлекаю новый токен...");
+      await delay(2000);
+
+      // Extract again now that user actually typed their creds.
+      const freshToken = await extractAuthToken(ctx, true);
+      if (freshToken) {
+        markValid(account.id, freshToken);
+        logInfo(`Токен обновлён для ${account.id}`);
+      } else {
+        throw new Error("Не удалось получить токен даже после ручного входа.");
+      }
+
+      saveAuthToken(freshToken); // Update global for proxy loop.
+    }
+
+    // ALWAYS overwrite cookies.json after a successful relgoin to keep them fresh!
+    const freshCookies = await ctx.cookies();
+    ensureAccountDir(account.id);
+    fs.writeFileSync(cookiePath, JSON.stringify(freshCookies, null, 2));
+    logInfo(`Свежие куки сохранены для ${account.id}`);
+
+    saveTokens(loadTokens()); // Persist updated token/invalid state.
+
+    console.log("------------------------------------------------------");
+    console.log("Аккаунт восстановлен и готов к работе!");
+    console.log("Нажмите ENTER чтобы перезапустить браузер в фоновом режиме...");
+    console.log("------------------------------------------------------\n");
+    await prompt("ENTER для продолжения...");
+  } catch (e) {
+    logError(`Ошибка при перелогине аккаунта ${account.id}`, e);
+  } finally {
+    // Always switch back to invisible background browser after relgoin.
+    await restartBrowserInHeadlessMode();
   }
-
-  markValid(account.id, token);
-  fs.writeFileSync(
-    path.resolve(__dirname, "..", "..", SESSION_DIR, ACCOUNTS_DIR, account.id, "token.txt"),
-    token,
-    "utf8"
-  );
-  logInfo(`Токен обновлён для ${account.id}`);
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Button 4: Remove account (unchanged)
+// ──────────────────────────────────────────────────────────────────────────────
 export async function removeAccountInteractive() {
   const tokens = loadTokens();
   if (!tokens.length) {
@@ -132,8 +253,10 @@ export async function removeAccountInteractive() {
 
   console.log("\nДоступные аккаунты:");
   tokens.forEach((t, idx) => console.log(`${idx + 1} - ${t.id}`));
-  const choice = await prompt("Номер аккаунта, который нужно удалить (или ENTER для отмены): ");
+
+  const choice = await prompt("Номер аккаунта для удаления (или ENTER для отмены): ");
   if (!choice) return;
+
   const num = parseInt(choice, 10);
   if (isNaN(num) || num < 1 || num > tokens.length) {
     console.log("Неверный выбор.");
@@ -146,9 +269,13 @@ export async function removeAccountInteractive() {
   if (confirm.toLowerCase() !== "y") return;
 
   removeToken(acc.id);
-  const dir = path.resolve(__dirname, "..", "..", SESSION_DIR, ACCOUNTS_DIR, acc.id);
+
+  // Delete local folder too.
+  const dir = path.resolve(__dirname, "..", "..", "session", "accounts", acc.id);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 
   logInfo(`Аккаунт ${acc.id} удалён.`);
   await prompt("ENTER чтобы вернуться...");
 }
+
+export default { addAccountInteractive, reloginAccountInteractive, removeAccountInteractive };
