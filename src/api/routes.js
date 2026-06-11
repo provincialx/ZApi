@@ -32,6 +32,8 @@ import {
   getModelDefaultChats,
   TOOL_CALL_RESET_THRESHOLD,
   persistSessionState,
+  mapChatId as chatMapChatId,
+  getChatTokenOwner,
 } from "./chatSession.js";
 
 // ─── OpenAI Message Processing ─────────────────────────────────────────────

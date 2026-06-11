@@ -63,7 +63,9 @@ export const LOG_MAX_SIZE = Number(process.env.LOG_MAX_SIZE) || 5_242_880; // 5 
 export const LOG_MAX_FILES = Number(process.env.LOG_MAX_FILES) || 5;
 
 // Время ожидания ответа от модели Qwen в минутах (по умолчанию 3)
-export const REQUEST_TIMEOUT_MINUTES = Number(process.env.REQUEST_TIMEOUT_MINUTES) || 3;
+// Время ожидания ответа от модели Qwen в минутах.
+// Ставим побольше, потому что тяжелые запросы могут долго думать внутри браузерного fetch'а.
+export const REQUEST_TIMEOUT_MINUTES = Number(process.env.REQUEST_TIMEOUT_MINUTES) || 5;
 
 // ─── Memory Guard ─────────────────────────────────────────────────────────────
 // RSS threshold (MB) to trigger automatic Chromium restart.

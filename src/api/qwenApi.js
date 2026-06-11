@@ -779,7 +779,8 @@ export async function sendMessage(
   toolChoice = null,
   systemMessage = null,
   retryCount = 0,
-  onChunk = null
+  onChunk = null,
+  preferredOwnerId = null
 ) {
   if (!chatId) {
     const newChatResult = await createChatV2(model, "Новый чат", 0);
@@ -808,7 +809,14 @@ export async function sendMessage(
 
   // Use the token that created this chat — Qwen chats belong to a specific account.
   // Without ownership, rotation picks random account → "not exist" on other accounts' chats.
-  const preferredOwner = getChatTokenOwner(chatId);
+  // Map proxy-hash to real qwen ID first if needed (ownership is stored by real ID).
+  const { getChatIdFromMap } = await import("./chatSession.js");
+  const realQwenChatId = getChatIdFromMap(chatId) || chatId;
+  const preferredOwner = getChatTokenOwner(realQwenChatId);
+
+  logDebug(
+    `Ищем токен для чата: proxyId=${chatId}, realId=${realQwenChatId}, owner=${preferredOwner}`
+  );
   const tokenObj = await resolveAuthToken(browserContext, preferredOwner);
   if (!tokenObj) return { error: "Ошибка авторизации: не удалось получить токен", chatId };
 
