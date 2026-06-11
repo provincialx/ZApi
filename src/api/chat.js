@@ -74,7 +74,12 @@ export async function extractAuthToken(context, forceRefresh = false) {
       });
       await delay(RETRY_DELAY);
 
-      const newToken = await evaluateInBrowser(page, () => localStorage.getItem("token"), [], 10_000);
+      const newToken = await evaluateInBrowser(
+        page,
+        () => localStorage.getItem("token"),
+        [],
+        10_000
+      );
       if (shouldClosePage) await page.close();
 
       if (newToken) {
@@ -107,10 +112,11 @@ export let availableModels = null;
 let authKeys = null;
 
 export function getAvailableModelsFromFile() {
+  if (availableModels) return availableModels; // already cached
   try {
     if (!fs.existsSync(MODELS_FILE)) {
       logError(`Файл с моделями не найден: ${MODELS_FILE}`);
-      return [DEFAULT_MODEL];
+      return (availableModels = [DEFAULT_MODEL]);
     }
     const models = fs
       .readFileSync(MODELS_FILE, "utf8")
@@ -126,10 +132,10 @@ export function getAvailableModelsFromFile() {
       logInfo(`... и ещё ${models.length - 3} моделей`);
     }
     logInfo("============================");
-    return models;
+    return (availableModels = models);
   } catch (error) {
     logError("Ошибка при чтении файла с моделями", error);
-    return [DEFAULT_MODEL];
+    return (availableModels = [DEFAULT_MODEL]);
   }
 }
 

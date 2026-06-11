@@ -21,9 +21,16 @@ src/
 │   │   └── _runGC() — cleanup stale sessions (>24h), cap maps (chatIdMap 500, idempotency 1000, chatTokenOwner 500)
 │   ├── openaiUtils.js              # Message parsing/normalization, tool state detection, folding helpers (buildStatelessTranscript)
 │   ├── responseBuilders.js         # SSE chunk construction: tool_call delivery, streaming fallback
-│   ├── qwenApi.js                  # Qwen API interaction: sendMessage, retry policy, error handling
+│   ├── qwenApi.js                  # Qwen API interaction: two-path strategy, retry policy, error handling
 │   │   ├── buildPayloadV2() — construct /api/v2/chat/completions payload
-│   │   ├── parseNonSseCompletionBody() — detect ret[], code, captcha/overload in non-SSE 200 responses (S43)
+│   │   ├── parseNonSseCompletionBody() — Node.js: detect ret[], code, captcha/overload in non-SSE 200 responses (S43)
+│   │   ├── parseNonSseInBrowser() — inline inside executeApiRequest evaluate callback; same logic as above but self-contained for Chromium context (S58)
+│   │   ├── executeApiRequestWithNodeStreaming() — Primary path: fast Node.js fetch with Origin/Referer/WAF-bypass headers + SSE reader + 15s empty-stream fast-fail (S59)
+│   │   ├── sendMessage() two-path flow (S59) ───
+│   │   │   ├─ Path 1: executeApiRequestWithNodeStreaming → stream directly to client
+│   │   │   ├─ Path 2: Browser fallback ONLY when WAF detected in path 1 response
+│   │   │   ├─ Shared response handler converges both paths (CAPTCHA, retry, not-exist recovery)
+│   │   │   └─ resolveCaptchaAndRetry() — centralized CAPTCHA/WAF challenge resolution
 │   │   ├── resolveAuthToken(browserContext, preferredOwnerId) — account binding + rotation logic
 │   │   ├── executeApiRequest(page, apiUrl, payload, token) — evaluateInBrowser fetch with SSE reader timeouts
 │   │   ├── createChatV2(model, title, parentId, tokenObj) — new chat creation via browser evaluate (JWT inject fallback: Node.js fetch)
@@ -198,7 +205,7 @@ flowchart LR
 | File | LOC | Notes |
 |------|-----|-------|
 | routes.js | ~1030 | Main handler. Grew with agent-loop logic (S22, S42). Refactored from 2390 → current via S11-14 splits. |
-| qwenApi.js | ~1400 | Qwen API interaction: sendMessage, createChatV2, executeApiRequest (evaluateInBrowser), resolveCaptchaAndRetry (S52), resolveAuthToken (account binding) |
+| qwenApi.js | ~1284 | Two-path strategy (S59): Node-stream primary + browser fallback on WAF. Shared response handler eliminates duplication from old ~1400 LOC. executeApiRequest, createChatV2, resolveCaptchaAndRetry, resolveAuthToken |
 | chatSession.js | ~630 | Chat ID resolution/generation/normalization, session persistence, folding trigger, **chatTokenOwner Map + GC** |
 | pagePool.js | ~374 | Page lifecycle with health checks, **evaluateInBrowser/evaluateWithTimeout helpers**, Memory Guard RSS restart (S31, S45) |
 | openaiUtils.js | ~400 | Message parsing, tool state detection, buildStatelessTranscript, compact builder port from Python fork (S23) |

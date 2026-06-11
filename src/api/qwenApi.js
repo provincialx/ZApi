@@ -36,6 +36,7 @@ import {
   RETRY_DELAY,
   DEFAULT_MODEL,
   MAX_RETRY_COUNT,
+  USER_AGENT,
 } from "../config.js";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -404,13 +405,20 @@ async function executeApiRequestWithNodeStreaming(
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
       Accept: "*/*",
+      Origin: "https://chat.qwen.ai",
+      Referer: "https://chat.qwen.ai/",
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-origin",
+      "User-Agent": USER_AGENT,
       ...(cookieStr ? { Cookie: cookieStr } : {}),
     };
 
+    const requestBody = JSON.stringify(payload);
     const response = await fetch(apiUrl, {
       method: "POST",
       headers,
-      body: JSON.stringify(payload),
+      body: requestBody,
     });
 
     if (!response.ok) {
@@ -423,6 +431,7 @@ async function executeApiRequestWithNodeStreaming(
       };
     }
 
+    // Non-streaming payload path (rare — used by createChatV2)
     if (payload.stream === false) {
       const jsonResponse = await response.json();
       if (jsonResponse.code === "RateLimited" || jsonResponse.error) {
@@ -456,60 +465,75 @@ async function executeApiRequestWithNodeStreaming(
     let streamError = null;
     let hasStreamedChunks = false;
 
-    while (!finished) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    // SSE fast-fail: abort empty stream after ~15s instead of hanging for REQUEST_TIMEOUT_MINUTES
+    const slowTimer = setTimeout(() => {
+      if (!hasStreamedChunks && !finished) {
+        logWarn("SSE fast-fail: no chunks received after 15s, aborting");
+        finished = true;
+      }
+    }, 15_000);
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+    try {
+      while (!finished) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line || !line.startsWith("data:")) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-        const jsonStr = line.substring(5).trim();
-        if (!jsonStr) continue;
-        if (jsonStr === "[DONE]") {
-          finished = true;
-          break;
-        }
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line || !line.startsWith("data:")) continue;
 
-        try {
-          const chunk = JSON.parse(jsonStr);
-
-          if (chunk.code === "RateLimited" || (chunk.code && chunk.detail)) {
-            streamError = { status: 429, errorBody: JSON.stringify(chunk) };
-            finished = true;
-            break;
-          }
-          if (chunk.error && !chunk.choices) {
-            streamError = { status: 500, errorBody: JSON.stringify(chunk) };
+          const jsonStr = line.substring(5).trim();
+          if (!jsonStr) continue;
+          if (jsonStr === "[DONE]") {
             finished = true;
             break;
           }
 
-          if (chunk["response.created"]) responseId = chunk["response.created"].response_id;
-          if (chunk.response_id) responseId = chunk.response_id;
+          try {
+            const chunk = JSON.parse(jsonStr);
 
-          if (chunk.choices && chunk.choices[0]) {
-            const delta = chunk.choices[0].delta;
-            if (delta && delta.content) {
-              fullContent += delta.content;
-              if (typeof onChunk === "function") {
-                onChunk(delta.content);
-                hasStreamedChunks = true;
-              }
+            if (chunk.code === "RateLimited" || (chunk.code && chunk.detail)) {
+              streamError = { status: 429, errorBody: JSON.stringify(chunk) };
+              finished = true;
+              break;
             }
-            if (delta && delta.status === "finished") finished = true;
-            if (chunk.choices[0].finish_reason) finished = true;
-          }
+            if (chunk.error && !chunk.choices) {
+              streamError = { status: 500, errorBody: JSON.stringify(chunk) };
+              finished = true;
+              break;
+            }
 
-          if (chunk.usage) usage = chunk.usage;
-        } catch {
-          // Ignore broken chunks, keep reading stream.
+            if (chunk["response.created"]) responseId = chunk["response.created"].response_id;
+            if (chunk.response_id) responseId = chunk.response_id;
+
+            if (chunk.choices && chunk.choices[0]) {
+              const delta = chunk.choices[0].delta;
+              if (delta && delta.content) {
+                fullContent += delta.content;
+                if (typeof onChunk === "function") {
+                  onChunk(delta.content);
+                  hasStreamedChunks = true;
+                }
+              }
+              if (delta && delta.status === "finished") finished = true;
+              if (chunk.choices[0].finish_reason) finished = true;
+            }
+
+            if (chunk.usage) usage = chunk.usage;
+          } catch {
+            // Ignore broken chunks, keep reading stream.
+          }
         }
       }
+    } finally {
+      clearTimeout(slowTimer);
+      try {
+        await reader.cancel();
+      } catch {}
     }
 
     if (streamError) {
@@ -820,7 +844,7 @@ export async function sendMessage(
     logWarn(`Модель "${model}" не найдена в списке доступных. Используется модель по умолчанию.`);
     model = DEFAULT_MODEL;
   }
-  logInfo(`Используемая модель: "${model}"`);
+  // Model logged once in getAvailableModelsFromFile() — no duplicate
 
   const browserContext = getBrowserContext();
   if (!browserContext) return { error: "Браузер не инициализирован", chatId };
@@ -838,88 +862,131 @@ export async function sendMessage(
   const tokenObj = await resolveAuthToken(browserContext, preferredOwner);
   if (!tokenObj) return { error: "Ошибка авторизации: не удалось получить токен", chatId };
 
-  let page = null;
-  try {
-    page = await pagePool.getPage(browserContext);
-
-    // Ensure page is on Qwen domain — browser fetch fails if context mismatches origin.
-    try {
-      await evaluateWithTimeout(page, () => document.location.host === "chat.qwen.ai");
-    } catch (e) {
-      logDebug(`Page not on chat.qwen.ai (${e.message}), navigating...`);
-    }
-
-    const currentHost = await page.evaluate(() => location.hostname);
-    if (currentHost !== "chat.qwen.ai") {
-      await page.goto(CHAT_PAGE_URL, { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT });
-    }
-
-    const verificationNeeded = await checkVerification(page);
-    if (verificationNeeded) {
-      await page.reload({
-        waitUntil: "domcontentloaded",
-        timeout: PAGE_TIMEOUT,
-      });
-    }
-
-    if (!getAuthToken()) {
-      logWarn("Токен отсутствует перед отправкой запроса");
-      setAuthToken(await page.evaluate(() => localStorage.getItem("token")));
-      if (!getAuthToken())
-        return {
-          error: "Токен авторизации не найден. Требуется перезапуск в ручном режиме.",
-          chatId,
-        };
-      saveAuthToken(getAuthToken());
-    }
-
-    logInfo("Отправка запроса к API v2...");
-
-    // CAPTCHA simulation: inject fake error response to test resolver e2e.
-    // Fires once per process. _captchaSimulated flag prevents loops on retries.
-    const simulateCaptcha = process.env.SIMULATE_CAPTCHA === "true" && !_captchaSimulated;
-
-    if (simulateCaptcha) {
-      _captchaSimulated = true;
-      logInfo("[СИМУЛЯЦИЯ] CAPTCHA — пропускаю реальный запрос, запускаю resolver");
-      pagePool.releasePage(page);
-      page = null;
-      // Return fake error that flows through normal isCaptcha handling below
-      return resolveCaptchaAndRetry(
-        browserContext,
-        messageContent,
-        model,
-        chatId,
-        parentId,
-        files,
-        tools,
-        toolChoice,
-        systemMessage,
-        retryCount,
-        onChunk
-      );
-    }
-
-    const payload = buildPayloadV2(
+  // CAPTCHA simulation: inject fake error response to test resolver e2e.
+  // Fires once per process. _captchaSimulated flag prevents loops on retries.
+  const simulateCaptcha = process.env.SIMULATE_CAPTCHA === "true" && !_captchaSimulated;
+  if (simulateCaptcha) {
+    _captchaSimulated = true;
+    logInfo("[СИМУЛЯЦИЯ] CAPTCHA — пропускаю реальный запрос, запускаю resolver");
+    return resolveCaptchaAndRetry(
+      browserContext,
       messageContent,
       model,
       chatId,
       parentId,
       files,
-      systemMessage,
       tools,
-      toolChoice
+      toolChoice,
+      systemMessage,
+      retryCount,
+      onChunk
     );
-    logDebug(`Отправка запроса к API v2 (model: ${payload.model}, chat_id: ${payload.chat_id})`);
-    // Full debug: enable for tool-calling troubleshooting only!
-    // logDebug("=== PAYLOAD V2 ===\n" + JSON.stringify(payload, null, 2));
-    logInfo(`Отправка сообщения в чат ${chatId} с parent_id: ${parentId || "null"}`);
+  }
 
-    const apiUrl = `${CHAT_API_URL}?chat_id=${chatId}`;
-    const response = await executeApiRequest(page, apiUrl, payload, getAuthToken(), onChunk);
-    pagePool.releasePage(page);
-    page = null;
+  // Build payload once — shared by both paths
+  const payload = buildPayloadV2(
+    messageContent,
+    model,
+    chatId,
+    parentId,
+    files,
+    systemMessage,
+    tools,
+    toolChoice
+  );
+  logDebug(`Отправка запроса к API v2 (model: ${payload.model}, chat_id: ${payload.chat_id})`);
+  // Full debug: enable for tool-calling troubleshooting only!
+  // logDebug("=== PAYLOAD V2 ===\n" + JSON.stringify(payload, null, 2));
 
+  const apiUrl = `${CHAT_API_URL}?chat_id=${chatId}`;
+
+  // ── Two-path strategy (S59) ───────────────────────────────────────────────
+  // Path 1: Node.js streaming — primary path. Fast, doesn't block CDP.
+  // Falls back to Path 2 only when Aliyun WAF blocks the request.
+
+  let response = null;
+  let page = null;
+
+  logInfo(`🟢 Node-streaming (path 1): чат ${chatId}, parent: ${parentId || "null"}`);
+  const cookieStr = getAuthToken();
+  try {
+    response = await executeApiRequestWithNodeStreaming(apiUrl, payload, cookieStr, onChunk);
+  } catch (err) {
+    logWarn(`Node-streaming failed: ${err.message}`);
+  }
+
+  try {
+    // ── Path 2: Browser fallback — only when WAF blocks Node path ───────────
+    if (response && !response.success && isCaptchaChallenge(response.errorBody)) {
+      logWarn("🟡 Aliyun WAF blocked Node-streaming → browser-evaluate fallback (path 2)");
+
+      try {
+        page = await pagePool.getPage(browserContext);
+
+        // Navigate to chat.qwen.ai if needed — origin mismatch breaks fetch.
+        const currentHost = await page.evaluate(() => location.hostname);
+        if (currentHost !== "chat.qwen.ai") {
+          logDebug(`Navigating from ${currentHost} → ${CHAT_PAGE_URL}`);
+          await page.goto(CHAT_PAGE_URL, { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT });
+
+          // Re-extract token after navigation (may differ if on different subdomain)
+          const extracted = await page.evaluate(() => localStorage.getItem("token"));
+          if (extracted && extracted !== cookieStr) {
+            logInfo("Токен обновлён после навигации для browser fallback");
+            setAuthToken(extracted);
+          }
+        } else {
+          // Page already on correct host — verify auth token freshness
+          const verificationNeeded = await checkVerification(page);
+          if (verificationNeeded) {
+            await page.reload({ waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT });
+          }
+        }
+
+        response = await executeApiRequest(page, apiUrl, payload, getAuthToken(), onChunk);
+        pagePool.releasePage(page);
+        page = null;
+      } catch (err) {
+        logError("Browser fallback also failed", err);
+        if (page) pagePool.releasePage(page);
+        return { error: `WAF fallback browser request failed: ${err.message}`, chatId };
+      }
+    } else if (
+      response &&
+      !response.success &&
+      response.error &&
+      response.error.includes("Токен авторизации")
+    ) {
+      // Token not found or invalid — try browser path to extract it from localStorage
+      logWarn("Токен отсутствует или невалиден → получение из браузера");
+      try {
+        page = await pagePool.getPage(browserContext);
+        const currentHost = await page.evaluate(() => location.hostname);
+        if (currentHost !== "chat.qwen.ai") {
+          await page.goto(CHAT_PAGE_URL, { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT });
+        }
+
+        setAuthToken(await page.evaluate(() => localStorage.getItem("token")));
+        if (!getAuthToken()) {
+          pagePool.releasePage(page);
+          return {
+            error: "Токен авторизации не найден. Требуется перезапуск в ручном режиме.",
+            chatId,
+          };
+        }
+        saveAuthToken(getAuthToken());
+
+        response = await executeApiRequest(page, apiUrl, payload, getAuthToken(), onChunk);
+        pagePool.releasePage(page);
+        page = null;
+      } catch (err) {
+        logError("Browser token-extraction failed", err);
+        if (page) pagePool.releasePage(page);
+        return { error: `Token extraction from browser failed: ${err.message}`, chatId };
+      }
+    }
+
+    // ── Shared response handling (both paths converge here) ───────────────────
     if (response.success) {
       logInfo("Ответ получен успешно");
       response.data.chatId = chatId;

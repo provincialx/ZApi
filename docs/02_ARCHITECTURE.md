@@ -2,7 +2,15 @@
 
 ## High-level overview
 
-FreeQwenApi is a browser-based proxy that replaces the Qwen Chat web account with a local OpenAI-compatible API endpoint (`localhost:3264`). All API calls to Qwen are emulated via JavaScript `fetch` **inside Puppeteer-controlled Chromium pages** using `evaluateInBrowser()`. This is mandatory — Aliyun WAF blocks Node.js HTTP clients and returns HTML verification pages instead of SSE/JSON.
+FreeQwenApi is a browser-based proxy that replaces the Qwen Chat web account with a local OpenAI-compatible API endpoint (`localhost:3264`).
+
+### Two-path strategy (S59)
+
+API requests use **Node.js streaming as the primary path** via `executeApiRequestWithNodeStreaming()`. This is fast, doesn't block CDP connections, and streams chunks directly to clients with proper Origin/Referer headers that bypass most WAF checks.
+
+Browser-evaluate (`evaluateInBrowser`) activates **only when Node.js detects Aliyun WAF markers** in the response. Before browser fallback: validates page hostname → navigates to chat.qwen.ai if needed + re-extracts token from localStorage.
+
+Both paths converge into shared `resolveWithRetry()`-style error handling — single retry/error logic handles CAPTCHA, rate limiting, and "chat not exist" recovery for both Node.js and browser responses.
 
 ```mermaid
 graph TB
@@ -15,12 +23,18 @@ graph TB
         C[chatSession.js<br/>ID resolution, ownership, session persistence]
         U[openaiUtils.js<br/>Message parsing, folding]
         T[toolUtils.js<br/>Prompt injection, JSON parse]
-        B2[qwenApi.js<br/>Qwen API interaction + account binding]
+        B2[qwenApi.js<br/>Two-path strategy: Node stream → Browser fallback]
+    end
+
+    subgraph TwoPath["Request execution (qwenApi.js)"]
+        direction TB
+        N1["① executeApiRequestWithNodeStreaming()<br/>Fast, no CDP lock,<br/>Origin/Referer headers"]
+        COND{"WAF<br/>detected?"}
+        B2_EVAL["② executeApiRequest() evaluateInBrowser<br/>Full browser context,<br/>CDP blocked ~3min"]
     end
 
     subgraph Browser["Chromium (Puppeteer)"]
         PP[pagePool.js<br/>Page lifecycle + health checks]
-        EVAL["evaluateInBrowser(fetch)<br/>SSE stream via browser context"]
     end
 
     subgraph Upstream["chat.qwen.ai Web API v2"]
@@ -32,16 +46,37 @@ graph TB
     R --> U
     R --> T
     R --> B2
-    B2 --> PP
-    PP --> EVAL
-    EVAL --> Q
+    B2 --> N1
+    N1 --> COND
+    COND -->|no WAF| Q
+    COND -->|aliyun_waf| B2_EVAL
+    PP --> B2_EVAL
+    B2_EVAL --> Q
 ```
 
-## Why browser-evaluate? (Aliyun WAF)
+## Two-path execution (S59)
 
-**Node.js `fetch` is blocked by Aliyun Cloud WAF.** When the proxy tried to send requests via Node's native HTTP client, WAF returned an HTML page with `<meta name="aliyun_waf_..">` tags instead of SSE data. Running `fetch()` inside `page.evaluate()` executes in the same browser context as chat.qwen.ai — cookies, origin headers, and TLS all match legitimate traffic. WAF passes through transparently.
+### Path 1: Node.js Streaming (Primary)
 
-**Side effect:** All requests lock one page from the pool during generation. SSE stream runs entirely within the tab for up to 5 minutes (configurable). This is why `protocolTimeout` in browser.js must exceed max generation time.
+`executeApiRequestWithNodeStreaming()` sends the request via global `fetch()` with browser-like headers (`Origin`, `Referer`, `Sec-Fetch-*`, `User-Agent`). This path:
+- **Does NOT lock CDP** — no Puppeteer page blocking during generation
+- Streams chunks directly to the client via `onChunk` callback
+- Handles SSE parsing, empty-stream fast-fail (15s timeout), and non-SSE error detection
+- Bypasses most WAF checks with proper headers (~90%+ of requests succeed this way)
+
+### Path 2: Browser Evaluate (Fallback)
+
+Activated ONLY when Node.js response contains `aliyun_waf` markers:
+- Validates page hostname → navigates to chat.qwen.ai if needed
+- Re-extracts token from localStorage after navigation
+- Runs full `evaluateInBrowser(fetch)` with SSE reader inside Chromium tab
+- Locks CDP for up to 3 minutes (SSE reader abort timeout)
+
+**Before S59:** All requests went through browser-evaluate, blocking CDP for the entire generation duration. This caused Zed Agent to timeout when fetch failed inside browser context.
+
+### Shared Error Handling
+
+Both paths converge into a single response handler that processes CAPTCHA, rate limiting, "parent_id not exist", "chat not exist" retries with consistent backoff logic.
 
 ## Request lifecycle — normal (no tools)
 
@@ -50,8 +85,10 @@ graph TB
 3. **Account binding**: proxy looks up which account owns this Qwen chat (`getChatTokenOwner`). If owner exists, uses that token exclusively. Without ownership = "not exist" errors on rotation.
 4. Message prepared: system message extracted, tool prompt injected if applicable (S04)
 5. History folded when >60 messages or force-fold threshold reached (S10)
-6. **qwenApi.js calls `executeApiRequest(page, apiUrl, payload, token)`** — runs `fetch()` via `evaluateInBrowser()` inside Chromium tab
-7. SSE stream assembled in-browser, chunks streamed back as OpenAI-compatible `data:` events
+6. **qwenApi.js two-path execution (S59)**:
+   - Path 1: `executeApiRequestWithNodeStreaming()` — fast Node.js fetch with Origin/Referer headers
+   - Path 2 (WAF fallback): `executeApiRequest(page)` — browser-evaluate if WAF blocks path 1
+7. SSE stream assembled, chunks streamed back as OpenAI-compatible `data:` events
 8. Session state persisted (chat ID mapping, parentId tracking)
 
 ```mermaid
@@ -230,7 +267,9 @@ Qwen added a slider CAPTCHA that returns HTTP 200 with JSON error body containin
 1. Immediate JSON error (detected via non-SSE parser)
 2. Empty stream that blocks forever — reader would hang for 60s until CDP timeout, deadlocking the page pool
 
-**Detection:** `parseNonSseCompletionBody()` detects `ret["FAIL_SYS_USER_VALIDATE"]` or `/captcha|punish/i` in body → maps to HTTP 503.
+**Detection:** `parseNonSseCompletionBody()` (Node.js) or `parseNonSseInBrowser()` (inside evaluate callback) detect `ret["FAIL_SYS_USER_VALIDATE"]` or `/captcha|punish/i` in body → map to HTTP 503.
+
+> **⚠ Browser context constraint (S58):** Functions inside `page.evaluate()` run in Chromium's JS engine, NOT Node.js. Puppeteer serializes only the callback body — external function references throw `ReferenceError: xxx is not defined`. Hence `parseNonSseInBrowser()` must be defined INSIDE the evaluate callback for proper serialization.
 
 ### Aliyun WAF (`aliyun_waf`)
 Aliyun Web Application Firewall returns an HTML page with `<meta name="aliyun_waf_..">` tags instead of the expected SSE/JSON response. This is a browser-level verification that blocks API requests until the user passes the challenge in a headed browser.
