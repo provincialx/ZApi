@@ -635,11 +635,18 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
         try {
           response = await fetch(fetchUrl, {
             method: "POST",
-            credentials: "include", // Send browser cookies — Qwen needs session, not just Bearer token
+            credentials: "include",
             headers: {
               "Content-Type": "application/json",
               Authorization: `Bearer ${data.token}`,
               Accept: "*/*",
+              // Qwen API validates Sec-Fetch-* on server side.
+              // Missing these = silent block (non-200 response) even with valid token/cookies.
+              Origin: browserOrigin,
+              Referer: `${browserOrigin}/`,
+              "Sec-Fetch-Dest": "empty",
+              "Sec-Fetch-Mode": "cors",
+              "Sec-Fetch-Site": "same-origin",
             },
             body: JSON.stringify(data.payload),
             signal: controller.signal,
