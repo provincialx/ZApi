@@ -542,8 +542,8 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
   logDebug(`API URL: ${apiUrl}`);
 
   // Use REQUEST_TIMEOUT — Qwen SSE can take minutes. Default 5s is only for health-checks.
-  const requestBody = { apiUrl, payload, token };
   const apiTimeoutMs = Math.max(REQUEST_TIMEOUT_MINUTES * 60_000 + 30_000, 120_000);
+  const requestBody = { apiUrl, payload, token, apiTimeoutMs };
   return evaluateInBrowser(
     page,
     async (data) => {
@@ -552,7 +552,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
 
         // Internal AbortController so browser fetch doesn't hang forever on slow Qwen responses.
         const abortCtrl = new AbortController();
-        setTimeout(() => abortCtrl.abort(), apiTimeoutMs);
+        setTimeout(() => abortCtrl.abort(), data.apiTimeoutMs);
 
         const response = await fetch(data.apiUrl, {
           method: "POST",
@@ -630,7 +630,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
         };
       } catch (error) {
         if (error?.name === "AbortError")
-          return { success: false, error: `API request timed out after ${apiTimeoutMs}ms` };
+          return { success: false, error: `API request timed out after ${data.apiTimeoutMs}ms` };
         return { success: false, error: error.toString() };
       }
     },
