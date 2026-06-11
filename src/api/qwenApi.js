@@ -536,31 +536,11 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChun
   }
 }
 
-// Use Node.js fetch for all API calls — evaluateInBrowser is unreliable on Qwen.
+// Always use browser evaluateInBrowser — Node.js fetch gets WAF-blocked by Qwen.
 async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
   logDebug(`Используем токен: ${token ? "Токен существует" : "Токен отсутствует"}`);
   logDebug(`API URL: ${apiUrl}`);
 
-  // Try Node.js fetch first (works for both streaming and non-streaming)
-  if (typeof fetch === "function") {
-    const response = await executeApiRequestWithNodeStreaming(apiUrl, payload, token, onChunk);
-
-    const canReturnDirectly =
-      response.success ||
-      Boolean(response.status) ||
-      Boolean(response.errorBody) ||
-      response.hasStreamedChunks === true;
-
-    if (canReturnDirectly) {
-      return response;
-    }
-
-    logWarn(
-      `Node-fetch недоступен (${response.error || "unknown error"}), fallback к browser fetch.`
-    );
-  }
-
-  // Fallback: execute in browser context.
   // Use REQUEST_TIMEOUT — Qwen SSE can take minutes. Default 5s is only for health-checks.
   const requestBody = { apiUrl, payload, token };
   const apiTimeoutMs = Math.max(REQUEST_TIMEOUT_MINUTES * 60_000 + 30_000, 120_000);
