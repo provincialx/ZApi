@@ -604,6 +604,12 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
       try {
         if (!data.token) return { success: false, error: "Токен авторизации не найден" };
 
+        // AbortController: kill fetch() itself if it hangs >120s. Prevents indefinite CDP lock.
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => {
+          controller.abort();
+        }, 120_000);
+
         const response = await fetch(data.apiUrl, {
           method: "POST",
           headers: {
@@ -612,7 +618,8 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
             Accept: "*/*",
           },
           body: JSON.stringify(data.payload),
-        });
+          signal: controller.signal,
+        }).finally(() => clearTimeout(timeoutId));
 
         if (response.ok) {
           const contentType = response.headers.get("content-type") || "";
@@ -957,7 +964,9 @@ export async function sendMessage(
           : "HTML response";
       logWarn(`🟡 Browser fallback forced: ${reason} → executeApiRequest`);
       try {
+        logInfo("⏳ Getting page from pool for browser fallback...");
         page = await pagePool.getPage(browserContext);
+        logInfo("✅ Page acquired, executing API request in browser context...");
 
         // Navigate to chat.qwen.ai if needed — origin mismatch breaks fetch.
         const currentHost = await page.evaluate(() => location.hostname);
@@ -980,6 +989,24 @@ export async function sendMessage(
         }
 
         response = await executeApiRequest(page, apiUrl, payload, getAuthToken(), onChunk);
+        logInfo(
+          `[Path2] Result: success=${response.success}, error=${
+            response.error || "none"
+          }, isCaptcha=${response.isCaptcha}`
+        );
+
+        // Even browser fetch can be blocked by WAF if the token/IP was flagged.
+        // If we get WAF HTML back from inside browser, try resolveCaptchaAndRetry.
+        if (!response.success && response.errorBody) {
+          const bodyStr = String(response.errorBody);
+          if (isCaptchaChallenge(bodyStr)) {
+            logWarn(
+              "Browser fallback also hit WAF → resolveCaptchaAndRetry needed. Body preview:",
+              bodyStr.substring(0, 200)
+            );
+          }
+        }
+
         pagePool.releasePage(page);
         page = null;
       } catch (err) {
