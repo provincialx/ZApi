@@ -540,6 +540,12 @@ async function executeApiRequestWithNodeStreaming(
       return { success: false, ...streamError, hasStreamedChunks };
     }
 
+    // WAF/CAPTCHA can arrive disguised as SSE with empty content — detect and return error.
+    if (!hasStreamedChunks && fullContent && isCaptchaChallenge(fullContent)) {
+      return { success: false, isCaptcha: true, errorBody: fullContent };
+    }
+
+    // Guard against empty stream that finished via slowTimer — no useful data received.
     return {
       success: true,
       isTask: false,
