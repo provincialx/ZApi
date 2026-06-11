@@ -17,7 +17,12 @@ import {
 import { checkAuthentication, checkVerification } from "../browser/auth.js";
 import { shutdownBrowser, initBrowser } from "../browser/browser.js";
 import { saveAuthToken } from "../browser/session.js";
-import { pagePool, createPage, evaluateWithTimeout } from "../browser/pagePool.js";
+import {
+  pagePool,
+  createPage,
+  evaluateWithTimeout,
+  evaluateInBrowser,
+} from "../browser/pagePool.js";
 import { getAvailableToken, getTokenById, markRateLimited } from "./tokenManager.js";
 import { invalidateQwenChatId, setChatTokenOwner, getChatTokenOwner } from "./chatSession.js";
 import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
@@ -134,9 +139,11 @@ async function resolveCaptchaAndRetry(
       const injected = await evaluateInBrowser(
         captchaPage,
         (t) => {
-        localStorage.setItem("token", t);
-        return localStorage.getItem("token") === t;
-      }, [savedToken]);
+          localStorage.setItem("token", t);
+          return localStorage.getItem("token") === t;
+        },
+        [savedToken]
+      );
 
       if (injected) logInfo(`Токен успешно восстановлен в браузере`);
       else logWarn("Не удалось записать токен в браузер");
@@ -555,168 +562,171 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
   return evaluateInBrowser(
     page,
     async (data) => {
-    try {
-      const t = data.token;
-      if (!t) return { success: false, error: "Токен авторизации не найден" };
+      try {
+        const t = data.token;
+        if (!t) return { success: false, error: "Токен авторизации не найден" };
 
-      const response = await fetch(data.apiUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${t}`,
-          Accept: "*/*",
-        },
-        body: JSON.stringify(data.payload),
-      });
+        const response = await fetch(data.apiUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${t}`,
+            Accept: "*/*",
+          },
+          body: JSON.stringify(data.payload),
+        });
 
-      if (response.ok) {
-        if (data.payload.stream === false) {
-          const jsonResponse = await response.json();
-          if (jsonResponse.code === "RateLimited" || jsonResponse.error) {
-            return {
-              success: false,
-              status: 429,
-              errorBody: JSON.stringify(jsonResponse),
-            };
+        if (response.ok) {
+          if (data.payload.stream === false) {
+            const jsonResponse = await response.json();
+            if (jsonResponse.code === "RateLimited" || jsonResponse.error) {
+              return {
+                success: false,
+                status: 429,
+                errorBody: JSON.stringify(jsonResponse),
+              };
+            }
+            return { success: true, isTask: true, data: jsonResponse };
           }
-          return { success: true, isTask: true, data: jsonResponse };
-        }
 
-        const contentType = response.headers.get("content-type") || "";
+          const contentType = response.headers.get("content-type") || "";
 
-        if (!contentType.includes("text/event-stream")) {
-          const body = await response.text();
-          try {
-            const parsed = JSON.parse(body);
-            const topLevelCode = parsed?.code;
-            const nestedCode = parsed?.data?.code;
-            const hasStructuredError =
-              parsed?.success === false ||
-              Boolean(parsed?.error) ||
-              Boolean(parsed?.data?.error) ||
-              Boolean(topLevelCode) ||
-              Boolean(nestedCode);
+          if (!contentType.includes("text/event-stream")) {
+            const body = await response.text();
+            try {
+              const parsed = JSON.parse(body);
+              const topLevelCode = parsed?.code;
+              const nestedCode = parsed?.data?.code;
+              const hasStructuredError =
+                parsed?.success === false ||
+                Boolean(parsed?.error) ||
+                Boolean(parsed?.data?.error) ||
+                Boolean(topLevelCode) ||
+                Boolean(nestedCode);
 
-            // CAPTCHA can be in structured error too.
-            if (hasStructuredError && body.includes("FAIL_SYS_USER_VALIDATE")) {
+              // CAPTCHA can be in structured error too.
+              if (hasStructuredError && body.includes("FAIL_SYS_USER_VALIDATE")) {
+                return { success: false, isCaptcha: true, errorBody: body };
+              }
+
+              if (hasStructuredError) {
+                const isRateLimited =
+                  topLevelCode === "RateLimited" || nestedCode === "RateLimited";
+                return {
+                  success: false,
+                  status: isRateLimited ? 429 : 500,
+                  errorBody: body,
+                };
+              }
+
+              if (parsed.choices || parsed.id || (parsed.success === true && parsed.data)) {
+                return { success: true, isTask: false, data: parsed };
+              }
+            } catch {
+              /* not JSON */
+            }
+
+            // CAPTCHA check inside browser evaluate.
+            if (body && body.includes("FAIL_SYS_USER_VALIDATE")) {
               return { success: false, isCaptcha: true, errorBody: body };
             }
 
-            if (hasStructuredError) {
-              const isRateLimited = topLevelCode === "RateLimited" || nestedCode === "RateLimited";
-              return {
-                success: false,
-                status: isRateLimited ? 429 : 500,
-                errorBody: body,
-              };
-            }
-
-            if (parsed.choices || parsed.id || (parsed.success === true && parsed.data)) {
-              return { success: true, isTask: false, data: parsed };
-            }
-          } catch {
-            /* not JSON */
+            return {
+              success: false,
+              error: "Unexpected non-SSE 200 response",
+              errorBody: body,
+            };
           }
 
-          // CAPTCHA check inside browser evaluate.
-          if (body && body.includes("FAIL_SYS_USER_VALIDATE")) {
-            return { success: false, isCaptcha: true, errorBody: body };
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let fullContent = "";
+          let responseId = null;
+          let usage = null;
+          let finished = false;
+          let streamError = null;
+
+          while (!finished) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+              if (!line.trim() || !line.startsWith("data: ")) continue;
+              const jsonStr = line.substring(6).trim();
+              if (!jsonStr) continue;
+              try {
+                const chunk = JSON.parse(jsonStr);
+
+                if (chunk.code === "RateLimited" || (chunk.code && chunk.detail)) {
+                  streamError = { status: 429, errorBody: JSON.stringify(chunk) };
+                  finished = true;
+                  break;
+                }
+                if (chunk.error && !chunk.choices) {
+                  streamError = { status: 500, errorBody: JSON.stringify(chunk) };
+                  finished = true;
+                  break;
+                }
+
+                if (chunk["response.created"]) responseId = chunk["response.created"].response_id;
+                if (chunk.choices && chunk.choices[0]) {
+                  const delta = chunk.choices[0].delta;
+                  if (delta && delta.content) fullContent += delta.content;
+                  if (delta && delta.status === "finished") finished = true;
+                }
+                if (chunk.usage) usage = chunk.usage;
+              } catch {
+                /* ignore parse errors for individual chunks */
+              }
+            }
+          }
+
+          if (streamError) {
+            return { success: false, ...streamError };
           }
 
           return {
-            success: false,
-            error: "Unexpected non-SSE 200 response",
-            errorBody: body,
+            success: true,
+            isTask: false,
+            data: {
+              id: responseId || "chatcmpl-" + Date.now(),
+              object: "chat.completion",
+              created: Math.floor(Date.now() / 1000),
+              model: data.payload.model,
+              choices: [
+                {
+                  index: 0,
+                  message: { role: "assistant", content: fullContent },
+                  finish_reason: "stop",
+                },
+              ],
+              usage: usage || {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+              },
+              response_id: responseId,
+            },
           };
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let fullContent = "";
-        let responseId = null;
-        let usage = null;
-        let finished = false;
-        let streamError = null;
-
-        while (!finished) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (!line.trim() || !line.startsWith("data: ")) continue;
-            const jsonStr = line.substring(6).trim();
-            if (!jsonStr) continue;
-            try {
-              const chunk = JSON.parse(jsonStr);
-
-              if (chunk.code === "RateLimited" || (chunk.code && chunk.detail)) {
-                streamError = { status: 429, errorBody: JSON.stringify(chunk) };
-                finished = true;
-                break;
-              }
-              if (chunk.error && !chunk.choices) {
-                streamError = { status: 500, errorBody: JSON.stringify(chunk) };
-                finished = true;
-                break;
-              }
-
-              if (chunk["response.created"]) responseId = chunk["response.created"].response_id;
-              if (chunk.choices && chunk.choices[0]) {
-                const delta = chunk.choices[0].delta;
-                if (delta && delta.content) fullContent += delta.content;
-                if (delta && delta.status === "finished") finished = true;
-              }
-              if (chunk.usage) usage = chunk.usage;
-            } catch {
-              /* ignore parse errors for individual chunks */
-            }
-          }
-        }
-
-        if (streamError) {
-          return { success: false, ...streamError };
-        }
-
+        const errorBody = await response.text();
         return {
-          success: true,
-          isTask: false,
-          data: {
-            id: responseId || "chatcmpl-" + Date.now(),
-            object: "chat.completion",
-            created: Math.floor(Date.now() / 1000),
-            model: data.payload.model,
-            choices: [
-              {
-                index: 0,
-                message: { role: "assistant", content: fullContent },
-                finish_reason: "stop",
-              },
-            ],
-            usage: usage || {
-              prompt_tokens: 0,
-              completion_tokens: 0,
-              total_tokens: 0,
-            },
-            response_id: responseId,
-          },
+          success: false,
+          status: response.status,
+          statusText: response.statusText,
+          errorBody,
         };
+      } catch (error) {
+        return { success: false, error: error.toString() };
       }
-
-      const errorBody = await response.text();
-      return {
-        success: false,
-        status: response.status,
-        statusText: response.statusText,
-        errorBody,
-      };
-    } catch (error) {
-      return { success: false, error: error.toString() };
-    }
-  }, [requestBody]);
+    },
+    [requestBody]
+  );
 }
 
 async function handleApiError(
@@ -1179,25 +1189,27 @@ export async function createChatV2(
     const result = await evaluateInBrowser(
       page,
       async (data) => {
-      try {
-        const response = await fetch(data.apiUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${data.token}`,
-          },
-          body: JSON.stringify(data.payload),
-        });
-        if (response.ok) return { success: true, data: await response.json() };
-        return {
-          success: false,
-          status: response.status,
-          errorBody: await response.text(),
-        };
-      } catch (error) {
-        return { success: false, error: error.toString() };
-      }
-    }, [requestBody]);
+        try {
+          const response = await fetch(data.apiUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${data.token}`,
+            },
+            body: JSON.stringify(data.payload),
+          });
+          if (response.ok) return { success: true, data: await response.json() };
+          return {
+            success: false,
+            status: response.status,
+            errorBody: await response.text(),
+          };
+        } catch (error) {
+          return { success: false, error: error.toString() };
+        }
+      },
+      [requestBody]
+    );
 
     pagePool.releasePage(page);
     page = null;
@@ -1269,20 +1281,22 @@ export async function testToken(token) {
     const result = await evaluateInBrowser(
       page,
       async (data) => {
-      try {
-        const res = await fetch(data.apiUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${data.token}`,
-          },
-          body: JSON.stringify(data.payload),
-        });
-        return { ok: res.ok, status: res.status };
-      } catch (e) {
-        return { ok: false, status: 0, error: e.toString() };
-      }
-    }, [requestBody]);
+        try {
+          const res = await fetch(data.apiUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${data.token}`,
+            },
+            body: JSON.stringify(data.payload),
+          });
+          return { ok: res.ok, status: res.status };
+        } catch (e) {
+          return { ok: false, status: 0, error: e.toString() };
+        }
+      },
+      [requestBody]
+    );
 
     if (result.ok || result.status === 400) return "OK";
     if (result.status === 401 || result.status === 403) return "UNAUTHORIZED";
