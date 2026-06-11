@@ -9,13 +9,7 @@ import {
   restartBrowserInHeadlessMode,
 } from "../browser/browser.js";
 import { extractAuthToken } from "../api/chat.js";
-import {
-  loadTokens,
-  saveTokens,
-  markValid,
-  removeToken,
-  setAuthToken as managerSetToken,
-} from "../api/tokenManager.js";
+import { loadTokens, saveTokens, markValid, removeToken } from "../api/tokenManager.js";
 import { clearSession, loadSession, saveAuthToken, loadAuthToken } from "../browser/session.js";
 import { logInfo, logError, logWarn } from "../logger/index.js";
 import { prompt } from "./prompt.js";
