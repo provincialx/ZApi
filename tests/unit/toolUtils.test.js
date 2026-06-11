@@ -8,7 +8,7 @@ import {
   applyToolPrompt,
   toolsToPrompt,
   toolsToLightPrompt,
-} from "../../src/api/toolUtils.js";
+} from "../../services/qwen/api/toolUtils.js";
 
 describe("toolUtils", () => {
   describe("truncateForPrompt", () => {

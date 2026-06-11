@@ -7,7 +7,7 @@ import { pagePool } from "./pagePool.js";
 import { getAuthToken, setAuthToken as chatSetToken } from "../api/chat.js";
 import fs from "fs";
 import path from "path";
-import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
+import { logInfo, logError, logWarn, logDebug } from "../../../shared/logger/index.js";
 import {
   CHAT_PAGE_URL,
   NAVIGATION_TIMEOUT,

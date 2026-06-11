@@ -11,8 +11,8 @@ import {
 import { extractAuthToken } from "../api/chat.js";
 import { loadTokens, saveTokens, markValid, removeToken } from "../api/tokenManager.js";
 import { clearSession, loadSession, saveAuthToken, loadAuthToken } from "../browser/session.js";
-import { logInfo, logError, logWarn } from "../logger/index.js";
-import { prompt } from "./prompt.js";
+import { logInfo, logError, logWarn } from "../../../shared/logger/index.js";
+import { prompt } from "../../../shared/utils/prompt.js";
 import { formatContactInfo } from "./branding.js";
 import { CHAT_PAGE_URL } from "../config.js";
 

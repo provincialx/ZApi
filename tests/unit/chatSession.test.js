@@ -10,7 +10,7 @@ import {
   extractConversationHint,
   extractParentHint,
   shouldForceNewChat,
-} from "../../src/api/chatSession.js";
+} from "../../services/qwen/api/chatSession.js";
 
 describe("chatSession", () => {
   describe("normalizeIdValue", () => {

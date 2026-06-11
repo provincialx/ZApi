@@ -1,4 +1,4 @@
-import { logError, logDebug } from "../logger/index.js";
+import { logError, logDebug } from "../../../shared/logger/index.js";
 import { STREAMING_CHUNK_DELAY } from "../config.js";
 import { sendMessage } from "./chat.js";
 

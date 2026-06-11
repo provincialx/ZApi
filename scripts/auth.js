@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
-import { loadTokens } from "../src/api/tokenManager.js";
+import { loadTokens } from "../services/qwen/api/tokenManager.js";
 import {
   addAccountInteractive,
   reloginAccountInteractive,
   removeAccountInteractive,
-} from "../src/utils/accountSetup.js";
-import { formatContactInfo } from "../src/utils/branding.js";
-import { prompt } from "../src/utils/prompt.js";
+} from "../services/qwen/utils/accountSetup.js";
+import { formatContactInfo } from "../services/qwen/utils/branding.js";
+import { prompt } from "../shared/utils/prompt.js";
 
 function printDivider() {
   console.log("======================================================");

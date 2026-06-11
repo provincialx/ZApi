@@ -7,7 +7,7 @@ import {
   prepareOpenAIMessageInput,
   getRepeatedToolCalls,
   getBlockedToolCalls,
-} from "../../src/api/openaiUtils.js";
+} from "../../services/qwen/api/openaiUtils.js";
 
 describe("openaiUtils", () => {
   describe("parseOpenAIMessages", () => {

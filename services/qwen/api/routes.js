@@ -9,7 +9,7 @@ import {
   normalizeToolCalls,
   applyToolPrompt,
 } from "./toolUtils.js";
-import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
+import { logInfo, logError, logWarn, logDebug } from "../../../shared/logger/index.js";
 import { getMappedModel } from "./modelMapping.js";
 import { loadHistory, saveHistory } from "./chatHistory.js";
 import crypto from "crypto";

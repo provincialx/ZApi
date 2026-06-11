@@ -5,7 +5,7 @@ import express from "express";
 import { getAllModels, createChatV2, testToken } from "./chat.js";
 import { getAuthenticationStatus, getBrowserContext } from "../browser/browser.js";
 import { checkAuthentication } from "../browser/auth.js";
-import { logInfo, logError } from "../logger/index.js";
+import { logInfo, logError } from "../../../shared/logger/index.js";
 import { getMappedModel } from "./modelMapping.js";
 import { DEFAULT_MODEL } from "../config.js";
 import { listTokens, markInvalid, markRateLimited, markValid } from "./tokenManager.js";

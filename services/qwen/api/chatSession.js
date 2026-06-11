@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { logInfo, logDebug } from "../logger/index.js";
+import { logInfo, logDebug } from "../../../shared/logger/index.js";
 import { ALLOW_UNSCOPED_SESSION_CHAT_RESTORE } from "../config.js";
 // Break circular dependency: chatSession → qwenApi → chatSession via dynamic import.
 // Synchronous createChatV2 import causes ESM module snapshot to return empty Maps when

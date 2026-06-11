@@ -1,231 +1,94 @@
-import "dotenv/config";
-import express from "express";
-import bodyParser from "body-parser";
+// index.js — Главный диспетчер. Выбор прокси-сервиса для запуска.
+import { prompt } from "./shared/utils/prompt.js";
 
-import { initBrowser, shutdownBrowser } from "./src/browser/browser.js";
-import apiRoutes from "./src/api/routes.js";
-import { getAvailableModelsFromFile, getApiKeys } from "./src/api/chat.js";
-import { loadTokens } from "./src/api/tokenManager.js";
-import { addAccountInteractive } from "./src/utils/accountSetup.js";
-import { logHttpRequest, logInfo, logError, logWarn } from "./src/logger/index.js";
-import { prompt } from "./src/utils/prompt.js";
-import { CONTACT_INFO } from "./src/utils/branding.js";
-import { PORT, HOST } from "./src/config.js";
+const SERVICES = [
+  {
+    id: "qwen",
+    label: "Qwen (chat.qwen.ai) — Puppeteer/WAF bypass",
+    entry: "./services/qwen/index.js",
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek (chat.deepseek.com) — Cookie/HTTP fetch",
+    entry: "./services/deepseek/index.js",
+  },
+];
 
-const app = express();
+// Future services with stub implementation will be enabled here when ready.
 
-const port = Number.parseInt(process.env.PORT ?? PORT, 10);
-const host = process.env.HOST || HOST;
-
-if (Number.isNaN(port) || port <= 0 || port > 65535) {
-  throw new Error(`Некорректное значение переменной PORT: ${process.env.PORT}`);
-}
-
-function toBoolean(value) {
-  if (typeof value !== "string") return false;
-  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
-const skipAccountMenu =
-  toBoolean(process.env.SKIP_ACCOUNT_MENU) || toBoolean(process.env.NON_INTERACTIVE);
-
-function ensureNonInteractiveTokens() {
-  const tokens = loadTokens();
-  if (!tokens.length) {
-    logError("Не найдено ни одного аккаунта. Запустите скрипт авторизации перед запуском сервера.");
-    process.exit(1);
-  }
-  const now = Date.now();
-  const validTokens = tokens.filter(
-    (t) => (!t.resetAt || new Date(t.resetAt).getTime() <= now) && !t.invalid
-  );
-  if (!validTokens.length) {
-    logError("Все аккаунты недоступны. Перезапустите авторизацию перед запуском сервера.");
-    process.exit(1);
-  }
-  logInfo(
-    `Автоматический запуск: обнаружено ${tokens.length} аккаунтов, из них ${validTokens.length} активны.`
-  );
-}
-
-app.use(logHttpRequest);
-app.use(bodyParser.json({ limit: "150mb" }));
-app.use(bodyParser.urlencoded({ limit: "150mb", extended: true }));
-
-app.use((err, req, res, next) => {
-  const isJsonSyntaxError =
-    err instanceof SyntaxError &&
-    err.status === 400 &&
-    Object.prototype.hasOwnProperty.call(err, "body");
-
-  if (isJsonSyntaxError) {
-    logWarn(`Некорректный JSON в запросе: ${err.message}`);
-    return res.status(400).json({
-      error: "Некорректный JSON",
-      message: "Проверьте тело запроса: используйте валидный JSON с двойными кавычками.",
-    });
-  }
-
-  return next(err);
-});
-
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, Authorization"
-  );
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-app.use("/api", apiRoutes);
-
-app.use((req, res) => {
-  logWarn(`404 Not Found: ${req.method} ${req.originalUrl}`);
-  res.status(404).json({ error: "Эндпоинт не найден" });
-});
-
-app.use((err, req, res, _next) => {
-  logError("Внутренняя ошибка сервера", err);
-  res.status(500).json({ error: "Внутренняя ошибка сервера" });
-});
-
-process.on("SIGINT", handleShutdown);
-process.on("SIGTERM", handleShutdown);
-process.on("SIGHUP", handleShutdown);
-let _shuttingDown = false;
-function safeShutdown() {
-  if (_shuttingDown) return; // prevent double-invocation from unhandledRejection + uncaughtException
-  _shuttingDown = true;
-  handleShutdown().catch(logError);
-}
-
-process.on("uncaughtException", (error) => {
-  logError("Необработанное исключение", error);
-  safeShutdown();
-});
-
-process.on("unhandledRejection", (reason) => {
-  logError(
-    "Unhandled promise rejection",
-    reason instanceof Error ? reason : new Error(String(reason))
-  );
-  safeShutdown();
-});
-
-async function handleShutdown() {
-  logInfo("\nПолучен сигнал завершения. Закрываем браузер...");
-  await shutdownBrowser();
-  logInfo("Завершение работы.");
-  process.exit(0);
-}
-
-async function startServer() {
+async function main() {
   console.log(`
-███████ ██████  ███████ ███████  ██████  ██     ██ ███████ ███    ██  █████  ██████  ██
-██      ██   ██ ██      ██      ██    ██ ██     ██ ██      ████   ██ ██   ██ ██   ██ ██
-█████   ██████  █████   █████   ██    ██ ██  █  ██ █████   ██ ██  ██ ███████ ██████  ██
-██      ██   ██ ██      ██      ██ ▄▄ ██ ██ ███ ██ ██      ██  ██ ██ ██   ██ ██      ██
-██      ██   ██ ███████ ███████  ██████   ███ ███  ███████ ██   ████ ██   ██ ██      ██
-                                    ▀▀
-   API-прокси для Qwen
-   ${CONTACT_INFO}
+███████ ██████   ██████       ██████   █████  ██      ██████
+██      ██   ██ ██    ██     ██    ██ ██   ██ ██     ██
+█████   ██████  ██    ██     ██    ██ ███████ ██      █████
+██      ██   ██ ██    ██     ██    ██ ██   ██ ██           ██
+██      ██   ██  ██████       ██████  ██   ██ ██     ██████
+
+================================================================================
+  Локальный прокси к бесплатным AI-сервисам (OpenAI-compatible API)
+  Выберите провайдер:
 `);
 
-  logInfo("Запуск сервера...");
-
-  if (!skipAccountMenu) {
-    while (true) {
-      const tokens = loadTokens();
-      console.log("\nСписок аккаунтов:");
-      if (!tokens.length) {
-        console.log("  (пусто)");
-      } else {
-        tokens.forEach((token, i) => {
-          const now = Date.now();
-          const isInvalid = token.invalid === true;
-          const isWaiting = Boolean(token.resetAt && new Date(token.resetAt).getTime() > now);
-          const statusLabel = isInvalid
-            ? "❌ Недействителен"
-            : isWaiting
-              ? "⏳ Ожидание сброса"
-              : "✅ OK";
-          const statusCode = isInvalid ? 0 : isWaiting ? 1 : 2;
-          console.log(
-            `${String(i + 1).padStart(2, " ")} | ${token.id} | ${statusLabel} (${statusCode})`
-          );
-        });
-      }
-      console.log("\n=== Меню ===");
-      console.log(`${CONTACT_INFO}`);
-      console.log("1 - Добавить новый аккаунт");
-      console.log("2 - Перелогинить аккаунт с истекшим токеном");
-      console.log("3 - Запустить прокси (по умолчанию)");
-      console.log("4 - Удалить аккаунт");
-
-      let choice = await prompt("Ваш выбор (Enter = 3): ");
-      if (!choice) choice = "3";
-
-      if (choice === "1") {
-        await addAccountInteractive();
-      } else if (choice === "2") {
-        const { reloginAccountInteractive } = await import("./src/utils/accountSetup.js");
-        await reloginAccountInteractive();
-      } else if (choice === "3") {
-        const hasValidToken = tokens.some((t) => {
-          if (t.invalid) return false;
-          if (!t.resetAt) return true;
-          return new Date(t.resetAt).getTime() <= Date.now();
-        });
-        if (!tokens.length || !hasValidToken) {
-          console.log("Нужен хотя бы один валидный аккаунт для запуска.");
-          continue;
-        }
-        break;
-      } else if (choice === "4") {
-        const { removeAccountInteractive } = await import("./src/utils/accountSetup.js");
-        await removeAccountInteractive();
-      }
-    }
-  } else {
-    ensureNonInteractiveTokens();
+  for (const [i, svc] of SERVICES.entries()) {
+    console.log(`${i + 1} - ${svc.label}`);
   }
 
-  const browserInitialized = await initBrowser(false);
-  if (!browserInitialized) {
-    logError("Не удалось инициализировать браузер. Завершение работы.");
+  const idx = Number.parseInt(
+    await prompt(`\nВаш выбор (${SERVICES.map((_, i) => i + 1).join("/")})`),
+    10
+  );
+
+  if (isNaN(idx) || idx < 1 || idx > SERVICES.length) {
+    console.log("Некорректный выбор.");
     process.exit(1);
   }
 
-  try {
-    app.listen(port, host, () => {
-      const displayHost = host === "0.0.0.0" ? "localhost" : host;
-      logInfo(`Сервер запущен на ${host}:${port}`);
-      logInfo(`API доступен по адресу: http://${displayHost}:${port}/api`);
+  const service = SERVICES[idx - 1];
+  console.log(`\n🚀 Запуск прокси: ${service.label}\n`);
 
-      // Show SIMULATE_CAPTCHA status at startup for debug.
-      const simCaptcha = process.env.SIMULATE_CAPTCHA;
-      if (simCaptcha) {
-        logWarn(`⚠️  SIMULATE_CAPTCHA=${simCaptcha} — первый запрос будет имитировать капчу`);
-      }
+  // Fork the service as a child process for process-level isolation
+  const { fork } = await import("child_process");
+  const path = await import("path");
 
-      getApiKeys();
-      getAvailableModelsFromFile();
-    });
-  } catch (err) {
-    if (err.code === "EADDRINUSE") {
-      logError(`Порт ${port} уже используется. Возможно, сервер уже запущен.`);
-      await shutdownBrowser();
-      process.exit(1);
+  const servicePath = path.default.resolve(process.cwd(), service.entry);
+
+  // Forward env vars to child
+  const childEnv = { ...process.env };
+
+  const child = fork(servicePath, [], {
+    cwd: process.cwd(),
+    env: childEnv,
+    stdio: "inherit", // Child shares stdin/stdout/stderr with parent (for interactive menu)
+  });
+
+  child.on("error", (err) => {
+    console.error(`❌ Ошибка запуска прокси ${service.label}:`, err.message);
+    process.exit(1);
+  });
+
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      console.log(`\n⚡ Прокси остановлен сигналом: ${signal}`);
+    } else if (code !== 0 && code !== null) {
+      console.log(`\n⚠️ Прoksi завершён с кодом: ${code}`);
+      process.exit(code);
     }
-    throw err;
-  }
+  });
+
+  // Forward termination signals to child
+  ["SIGINT", "SIGTERM", "SIGHUP"].forEach((sig) => {
+    process.on(sig, () => {
+      console.log(`\n🛑 Передаю сигнал ${sig} прокси...`);
+      try {
+        child.kill(sig);
+      } catch {
+        // Child already exited
+      }
+    });
+  });
 }
 
-startServer().catch(async (error) => {
-  logError("Ошибка при запуске сервера", error);
-  await shutdownBrowser();
+main().catch((err) => {
+  console.error("Ошибка запуска диспетчера:", err);
   process.exit(1);
 });

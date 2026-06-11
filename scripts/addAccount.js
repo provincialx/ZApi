@@ -1,8 +1,8 @@
-// Скрипт interactively добавляет новые аккаунты.
+// Скрипт interactively добавляет новые аккаунты Qwen.
 // Запуск: node scripts/addAccount.js
 
-import { interactiveAccountMenu } from "../src/utils/accountSetup.js";
+import { addAccountInteractive } from "../services/qwen/utils/accountSetup.js";
 
 (async () => {
-  await interactiveAccountMenu();
+  await addAccountInteractive();
 })();

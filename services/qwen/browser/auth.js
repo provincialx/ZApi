@@ -5,7 +5,7 @@ import {
   restartBrowserInHeadlessMode,
 } from "./browser.js";
 import { extractAuthToken } from "../api/chat.js";
-import { logInfo, logError, logWarn } from "../logger/index.js";
+import { logInfo, logError, logWarn } from "../../../shared/logger/index.js";
 import { CHAT_PAGE_URL, AUTH_SIGNIN_URL, PAGE_TIMEOUT, RETRY_DELAY } from "../config.js";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

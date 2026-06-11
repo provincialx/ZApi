@@ -6,7 +6,7 @@ import { saveAuthToken } from "../browser/session.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { logInfo, logError, logWarn } from "../logger/index.js";
+import { logInfo, logError, logWarn } from "../../../shared/logger/index.js";
 
 // Page pool (browser layer) — re-exported for backward compatibility:
 // fileUpload.js, browser.js, auth.js import pagePool here.
@@ -105,8 +105,8 @@ export async function extractAuthToken(context, forceRefresh = false) {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const MODELS_FILE = path.join(__dirname, "..", "AvailableModels.txt");
-const AUTH_KEYS_FILE = path.join(__dirname, "..", "Authorization.txt");
+const MODELS_FILE = path.join(__dirname, "..", "data", "AvailableModels.txt");
+const AUTH_KEYS_FILE = path.join(__dirname, "..", "data", "Authorization.txt");
 
 export let availableModels = null;
 let authKeys = null;

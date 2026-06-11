@@ -25,7 +25,7 @@ import {
 } from "../browser/pagePool.js";
 import { getAvailableToken, getTokenById, markRateLimited } from "./tokenManager.js";
 import { invalidateQwenChatId, setChatTokenOwner, getChatTokenOwner } from "./chatSession.js";
-import { logInfo, logError, logWarn, logDebug } from "../logger/index.js";
+import { logInfo, logError, logWarn, logDebug } from "../../../shared/logger/index.js";
 import crypto from "crypto";
 import {
   CHAT_API_URL,

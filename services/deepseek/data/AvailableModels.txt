@@ -1,0 +1,6 @@
+# DeepSeek Web API — доступные модели
+# deepseek-v3 — стандартная модель (быстрая, без thinking)
+deepseek-v3
+
+# deepseek-r1 — reasoning model с расширенным анализом (медленнее, лучше для кода/математики)
+deepseek-r1

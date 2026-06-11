@@ -2,47 +2,69 @@
 
 ## Health: GREEN
 
-All core paths operational. 50+ development sessions across 5 days (June 7–11). No blocking issues.
+Multi-provider proxy architecture operational. 50+ development sessions across 5 days (June 7–11). No blocking issues.
 
-| Area | Status | Notes |
-|------|--------|-------|
-| Tool calling (SSE + streaming) | Working | Anti-loop guards, chunk splitting, parse reliability |
-| Agent-loop stability | Working | Deferred auto-reset, cooldown, same-chat retry on "in progress" |
-| Chat management | Working | S46: resolveQwenChatId creates chat when no default exists. invalidateQwenChatId cleans ALL maps on "not exist" error. Early mapChatId (S57) saves mapping before SSE timeout loses it. |
-| Page pool memory | Mitigated | Hard limit 5 pages, idle TTL 5min, periodic GC every 60s, Memory Guard RSS restart |
-| Timeout enforcement | Active | `REQUEST_TIMEOUT_MINUTES` (5m) wrapper + protocolTimeout synced at ~180s+ CDP limit. SSE reader abort 3min (S57). |
-| CAPTCHA resolver | Working | S52: centralized `resolveCaptchaAndRetry()`, JWT inject, `SIMULATE_CAPTCHA` test mode |
-| Unit tests | Passing | 46/46 (`npm test`) |
-| ESLint | Clean | 0 errors, ~37 warnings (known unused imports — tech-debt) |
-| Prettier | Formatted | All files clean |
-| CAPTCHA handling | Active | Visible browser resolver + reader timeout guard against stream hangs |
-| Aliyun WAF bypass | Working | All API requests via `evaluateInBrowser` (page.evaluate fetch) — WAF sees legitimate browser context |
-| Account binding | Working | chatTokenOwner Map, resolveAuthToken(preferredOwner) — chats belong to the account that created them |
-| Multi-account management | Working | Add account clears old token + saves per-account dir. Relogin restores from cookies first, then manual fallback |
+### Architecture S61+: Multi-Provider Separation
 
-## Critical Architecture Changes (June 11)
+Project refactored into **process-level isolation**: `index.js` dispatcher forks independent service processes. Each provider runs in its own process with dedicated browser/memory/resources. Shared utilities (`shared/`) reused across all services via relative imports.
 
-### Full browser-evaluate path (Aliyun WAF bypass)
-All API requests to Qwen now execute via `evaluateInBrowser()` inside Chromium tabs. Node.js `fetch` is blocked by Aliyun WAF (returns HTML instead of SSE/JSON). Running `fetch()` inside `page.evaluate()` makes requests appear as legitimate browser traffic — WAF passes them through, SSE streams flow uninterrupted for up to 5 minutes.
+| Area                              | Status    | Notes                                                                                                                                                                                                                                                       |
+| --------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Multi-provider architecture       | Working   | S61: `index.js` dispatcher → forks Qwen and DeepSeek as isolated child processes via `child_process.fork()` with signal forwarding                                                                                                                          |
+| Tool calling (SSE + streaming)    | Working   | Qwen only. Anti-loop guards, chunk splitting, parse reliability. DeepSeek: native OpenAI tool_calls supported at API level — requires agent-loop routing in routes.js layer.                                                                                |
+| Agent-loop stability              | Working   | Qwen: Deferred auto-reset, cooldown, same-chat retry on "in progress". DeepSeek: not implemented (single-message model).                                                                                                                                    |
+| Chat management                   | Working   | S46: resolveQwenChatId creates chat when no default exists. invalidateQwenChatId cleans ALL maps on "not exist" error. Early mapChatId (S57) saves mapping before SSE timeout loses it. DeepSeek: simple in-memory Map<conversation_id → deepseek_chat_id>. |
+| Page pool memory (Qwen)           | Mitigated | Hard limit 5 pages, idle TTL 5min, periodic GC every 60s, Memory Guard RSS restart                                                                                                                                                                          |
+| Timeout enforcement               | Active    | `REQUEST_TIMEOUT_MINUTES` (5m) wrapper + protocolTimeout synced at ~180s+ CDP limit. SSE reader abort 3min (S57). DeepSeek: configurable per-service timeout via `DEEPSEEK_REQUEST_TIMEOUT` env var (default 5 min).                                        |
+| CAPTCHA resolver (Qwen)           | Working   | S52: centralized `resolveCaptchaAndRetry()`, JWT inject, `SIMULATE_CAPTCHA` test mode. DeepSeek: Cloudflare Turnstile — bypassed via cookie extraction on initial browser auth.                                                                             |
+| Unit tests                        | Passing   | 46/46 (`npm test`) — Qwen unit suite unchanged. DeepSeek: no dedicated tests yet (D12).                                                                                                                                                                     |
+| ESLint                            | Clean     | 0 errors, ~37 warnings (known unused imports — tech-debt)                                                                                                                                                                                                   |
+| Prettier                          | Formatted | All files clean                                                                                                                                                                                                                                             |
+| Aliyun WAF bypass (Qwen)          | Working   | All API requests via `evaluateInBrowser` (page.evaluate fetch) — WAF sees legitimate browser context. Two-path strategy (S59): Node.js streaming primary + browser fallback on WAF detection.                                                               |
+| Cookie auth extraction (DeepSeek) | Working   | Puppeteer one-time visible launch → user login → cookies.json + storage.json saved → HTTP fetch uses cookie string for all subsequent requests                                                                                                              |
+| Account binding (Qwen)            | Working   | chatTokenOwner Map, resolveAuthToken(preferredOwner) — chats belong to the account that created them                                                                                                                                                        |
+| Multi-account management (Qwen)   | Working   | Add account clears old token + saves per-account dir. Relogin restores from cookies first, then manual fallback                                                                                                                                             |
 
-### Increased timeouts
-- Proxy global limit: **5 min** (`REQUEST_TIMEOUT_MINUTES` in config.js)
-- CDP protocol timeout: calculated from REQUEST_TIMEOUT (~180s+ minimum) so long SSE generations don't break the connection
-- `evaluateInBrowser` default: same as `executeApiRequest` apiTimeoutMs (≥ 180s)
+## Provider Comparison
 
-### Hard account-to-chat binding
-Each Qwen chat is tied to the token that created it (`setChatTokenOwner`). When sending messages, the proxy resolves ownership via `getChatTokenOwner(realQwenChatId)` and passes `preferredOwnerId` to `resolveAuthToken()`. Without this, token rotation would pick random accounts → "not exist" errors on other accounts' chats.
+| Feature              | Qwen (`services/qwen/`)                                                                       | DeepSeek (`services/deepseek/`)                                                                                                  |
+| -------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **API URL**          | `chat.qwen.ai/api/v2/chat/completions`                                                        | `chat.deepseek.com/api/v0/chat/completion`                                                                                       |
+| **Auth**             | Token-based (JWT in localStorage). Multi-account via cookie-per-account.                      | Cookie + Storage extraction (cf_clearance, session cookies). Single session per service instance.                                |
+| **WAF/Protection**   | Aliyun WAF + CSP block on evaluate fetch. Requires `evaluateInBrowser()` + two-path strategy. | CloudFront. Direct Node.js `fetch` works with cookie string. No browser-evaluate needed for API calls.                           |
+| **Tool Calls**       | Custom prompt injection (no native support). JSON parse roundtrip via `toolUtils.js`.         | Native OpenAI `tools[]` format supported by underlying R1/V3 models — proxy pass-through only, agent-loop logic in routes layer. |
+| **Models**           | qwen3.7-max, qwen3-coder-plus, qwen3.5-plus/flash                                             | deepseek-v3 (fast), deepseek-r1 (thinking/reasoning)                                                                             |
+| **Memory footprint** | ~500MB+ (Chromium browser pool + page.evaluate locks). Heavy Puppeteer infrastructure.        | ~50MB (Express server only, no persistent browser — headless auth on-demand for session refresh).                                |
+| **Code size**        | ~28 files, ~4500 LOC total                                                                    | 5 files, ~600 LOC total                                                                                                          |
 
-### Account management overhaul
-- **Add account**: clears stale global `auth_token.txt`, launches visible browser, waits for user login, extracts + saves token per-account in `session/accounts/{id}/token.txt`, updates tokenManager list, restarts headless.
-- **Relogin account**: loads saved cookies FIRST (`cookies.json`), restores session if alive → no manual re-entry needed. If cookies dead → shows login page for user to authenticate manually. Saves new cookies + updates token in tokenManager.
+## Shared Infrastructure (`shared/`)
+
+| File              | Purpose                                                                | Shared by                                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `config.js`       | PORT, HOST, LOG_LEVEL, LOG_MAX_SIZE, LOGS_DIR                          | All services import here for base server settings. Per-service config overrides service-specific values (URLs, timeouts). |
+| `logger/index.js` | Winston + Morgan structured logging (`logInfo`, `logWarn`, `logError`) | All services use relative path imports (`../../../shared/logger/...`).                                                    |
+| `utils/prompt.js` | CLI readline prompt helper for interactive menus                       | Qwen account menu, DeepSeek auth menu, main dispatcher.                                                                   |
 
 ## Quick Start
 
 ```bash
-node index.js          # launches browser, waits for manual auth
+node index.js          # Dispatcher: choose provider (1=Qwen, 2=DeepSeek) → forks child process
 npm test               # unit tests (no browser required)
 npm run lint           # ESLint check
 npm run format         # Prettier write
-node scripts/auth.js   # account management CLI: --list, --add, --relogin, --remove
+node scripts/auth.js   # Qwen account management CLI (--list, --add, --relogin, --remove)
 ```
+
+## Critical Architecture Changes (S61+)
+
+### Process-level isolation via child_process.fork()
+
+`index.js` is now a pure dispatcher. Selected service entry point forked as separate process with `stdio: "inherit"` for interactive CLI menus in child. Parent forwards SIGINT/SIGTERM/SIGHUP to child via `child.kill(sig)`. Each provider runs on its own port (Qwen: 3264, DeepSeek: configurable via DEEPSEEK_PORT or shared PORT).
+
+### Shared directory pattern
+
+Common utilities extracted to `shared/` with absolute-relative imports from any depth (`../../../../shared/logger/...`). Eliminates duplication of logging, CLI prompts, base config across providers. Future providers only need their own `services/<name>/index.js` + API layer — no logger/config rewrites.
+
+### Old src/ removed
+
+Legacy single-repo structure (`src/api`, `src/browser`, `src/utils`) migrated to provider-scoped directories under `services/qwen/`. Directories cleaned, imports rewritten. Backward-compatible via new paths only.

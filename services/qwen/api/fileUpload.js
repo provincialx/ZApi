@@ -1,5 +1,5 @@
 import { getBrowserContext } from "../browser/browser.js";
-import { logInfo, logError } from "../logger/index.js";
+import { logInfo, logError } from "../../../shared/logger/index.js";
 import { getAuthToken, extractAuthToken } from "./chat.js";
 import { pagePool, evaluateInBrowser } from "../browser/pagePool.js";
 import { getAvailableToken } from "./tokenManager.js";

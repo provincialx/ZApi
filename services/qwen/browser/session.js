@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { logInfo, logError, logWarn } from "../logger/index.js";
+import { logInfo, logError, logWarn } from "../../../shared/logger/index.js";
 import { SESSION_DIR } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
