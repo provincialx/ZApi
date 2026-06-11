@@ -32,6 +32,7 @@ import {
   CREATE_CHAT_URL,
   CHAT_PAGE_URL,
   PAGE_TIMEOUT,
+  REQUEST_TIMEOUT_MINUTES,
   RETRY_DELAY,
   DEFAULT_MODEL,
   MAX_RETRY_COUNT,
@@ -559,13 +560,19 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
     );
   }
 
-  // Fallback: execute in browser context (should rarely be needed)
+  // Fallback: execute in browser context.
+  // Use REQUEST_TIMEOUT — Qwen SSE can take minutes. Default 5s is only for health-checks.
   const requestBody = { apiUrl, payload, token };
+  const apiTimeoutMs = Math.max(REQUEST_TIMEOUT_MINUTES * 60_000 + 30_000, 120_000);
   return evaluateInBrowser(
     page,
     async (data) => {
       try {
         if (!data.token) return { success: false, error: "Токен авторизации не найден" };
+
+        // Internal AbortController so browser fetch doesn't hang forever on slow Qwen responses.
+        const abortCtrl = new AbortController();
+        setTimeout(() => abortCtrl.abort(), apiTimeoutMs);
 
         const response = await fetch(data.apiUrl, {
           method: "POST",
@@ -575,6 +582,7 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
             Accept: "*/*",
           },
           body: JSON.stringify(data.payload),
+          signal: abortCtrl.signal,
         });
 
         if (response.ok) {
@@ -641,10 +649,13 @@ async function executeApiRequest(page, apiUrl, payload, token, onChunk = null) {
           errorBody,
         };
       } catch (error) {
+        if (error?.name === "AbortError")
+          return { success: false, error: `API request timed out after ${apiTimeoutMs}ms` };
         return { success: false, error: error.toString() };
       }
     },
-    [requestBody]
+    [requestBody],
+    apiTimeoutMs
   );
 }
 

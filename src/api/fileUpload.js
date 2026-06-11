@@ -43,6 +43,7 @@ export async function getStsToken(fileInfo) {
   let page = null;
   try {
     page = await pagePool.getPage(browserContext);
+    // Use 30s timeout — STS API is fast but Qwen can be slow under load.
     const result = await evaluateInBrowser(
       page,
       async (data) => {
@@ -67,7 +68,8 @@ export async function getStsToken(fileInfo) {
           return { success: false, error: error.toString() };
         }
       },
-      [{ apiUrl: STS_TOKEN_API_URL, token, fileInfo }]
+      [{ apiUrl: STS_TOKEN_API_URL, token, fileInfo }],
+      30_000
     );
 
     if (result.success) {
@@ -118,6 +120,7 @@ export async function uploadFile(filePath, stsData) {
   let page = null;
   try {
     page = await pagePool.getPage(browserContext);
+    // Use 60s timeout — OSS SDK load + file upload can take time for large files.
     const result = await evaluateInBrowser(
       page,
       async (data) => {
@@ -146,18 +149,21 @@ export async function uploadFile(filePath, stsData) {
           return { success: false, error: error.toString() };
         }
       },
-      {
-        fileBase64,
-        ossSdkUrl: OSS_SDK_URL,
-        stsData: {
-          region: stsData.region,
-          bucketname: stsData.bucketname,
-          file_path: stsData.file_path,
-          access_key_id: stsData.access_key_id,
-          access_key_secret: stsData.access_key_secret,
-          security_token: stsData.security_token,
+      [
+        {
+          fileBase64,
+          ossSdkUrl: OSS_SDK_URL,
+          stsData: {
+            region: stsData.region,
+            bucketname: stsData.bucketname,
+            file_path: stsData.file_path,
+            access_key_id: stsData.access_key_id,
+            access_key_secret: stsData.access_key_secret,
+            security_token: stsData.security_token,
+          },
         },
-      }
+      ],
+      60_000
     );
 
     if (result.success) {
