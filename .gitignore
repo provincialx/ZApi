@@ -52,3 +52,4 @@ venv/
 src/Authorization.txt
 accounts
 /zapi/*
+*ai.har

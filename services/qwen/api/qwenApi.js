@@ -221,6 +221,17 @@ async function resolveCaptchaAndRetry(
     // CAPTCHA пройдена — сбрасываем WAF флаг, следующий запрос попробует Path 1 снова
     _wafActive = false;
 
+    // Save WAF session cookies (x5sec, umidtoken, etc.) before shutdown.
+    // Без них headless браузер получит старые cookies без WAF-сессии → запросы заблокированы.
+    try {
+      const { saveSession } = await import("../browser/session.js");
+      const accountId = `acc_${Date.now()}`;
+      await saveSession(captchaPage, accountId);
+      logInfo(`Cookies после CAPTCHA сохранены: ${accountId}`);
+    } catch (e) {
+      logWarn(`Не удалось сохранить cookies после CAPTCHA: ${e.message}`);
+    }
+
     pagePool.releasePage(captchaPage);
 
     // Return to headless mode.
@@ -608,9 +619,11 @@ async function executeApiRequest(page, apiUrl, payload, onChunk = null) {
   // Path 2 (browser fetch) — uses page's native fetch wrapped by WAF SDK.
   // WAF SDK adds bx-ua, bx-umidtoken, bx-v headers automatically.
   // Auth is via cookies (credentials: "include"), no Bearer token needed.
-  const FETCH_TIMEOUT_MS = Number(process.env.PATH2_FETCH_TIMEOUT) || 60_000;
+  // WAF либо блокирует за секунды, либо пускает. 20s достаточно.
+  // Настраивается через PATH2_FETCH_TIMEOUT (env).
+  const FETCH_TIMEOUT_MS = Number(process.env.PATH2_FETCH_TIMEOUT) || 20_000;
   // Overall evaluate timeout — don't let Path 2 hang the main request.
-  const PATH2_EVALUATE_TIMEOUT = Number(process.env.PATH2_EVALUATE_TIMEOUT) || 120_000;
+  const PATH2_EVALUATE_TIMEOUT = Number(process.env.PATH2_EVALUATE_TIMEOUT) || 60_000;
 
   const requestBody = { apiUrl, payload, fetchTimeout: FETCH_TIMEOUT_MS };
 
@@ -724,9 +737,30 @@ async function executeApiRequest(page, apiUrl, payload, onChunk = null) {
         if (fullText.ok) {
           const contentType = respMeta.contentType;
           if (!contentType.includes("text/event-stream")) {
-            // Non-SSE response — parse as JSON or HTML.
+            // Non-SSE response — parse inline (page.evaluate can't access Node.js fn).
+            // Inlined parseNonSseCompletionBody logic:
+            var info = (function (b) {
+              try {
+                var p = JSON.parse(b);
+                var tc = p && p.code,
+                  nc = p && p.data && p.data.code;
+                var hasErr =
+                  p && (p.success === false || p.error || (p.data && p.data.error) || tc || nc);
+                if (b.indexOf("FAIL_SYS_USER_VALIDATE") >= 0)
+                  return { success: false, isCaptcha: true, errorBody: b };
+                if (hasErr)
+                  return {
+                    success: false,
+                    status: tc === "RateLimited" || nc === "RateLimited" ? 429 : 500,
+                    errorBody: b,
+                  };
+                if (p && (p.choices || p.id || (p.success === true && p.data)))
+                  return { success: true, isTask: false, data: p };
+              } catch (e) {}
+              return { success: false, error: "Unexpected non-SSE 200 response", errorBody: b };
+            })(fullText.text);
             return {
-              ...parseNonSseCompletionBody(fullText.text),
+              ...info,
               debugMeta: respMeta,
               responseBodyPreview: (fullText.text || "").substring(0, 300),
             };
