@@ -8,57 +8,171 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { logInfo, logWarn } from "../../../shared/logger/index.js";
+import { logInfo, logWarn, logDebug } from "../../../shared/logger/index.js";
 import { CHAT_PAGE_URL, DEEPSEEK_MODELS } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ACCOUNTS_PATH = path.resolve(__dirname, "..", "..", "session");
-const DEEPSEEK_ACCOUNTS_FILE = path.join(ACCOUNTS_PATH, "deepseek_accounts.json");
+const ACCOUNTS_PATH = path.resolve(__dirname, "..", "..", "session"); // Project root session/
+const LEGACY_ACCOUNTS_PATH = path.resolve(__dirname, "..", "session"); // services/session/ (old location)
+
+// Resolve active file once at module load to prevent split reads/writes
+let ACTIVE_FILE = null;
+function resolveActiveFile() {
+  if (ACTIVE_FILE) return ACTIVE_FILE;
+  const newFile = path.join(ACCOUNTS_PATH, "deepseek_accounts.json");
+  const oldFile = path.join(LEGACY_ACCOUNTS_PATH, "deepseek_accounts.json");
+
+  if (fs.existsSync(newFile)) {
+    ACTIVE_FILE = { file: newFile, dir: ACCOUNTS_PATH };
+  } else if (fs.existsSync(oldFile)) {
+    ACTIVE_FILE = { file: oldFile, dir: LEGACY_ACCOUNTS_PATH };
+  } else {
+    ACTIVE_FILE = { file: newFile, dir: ACCOUNTS_PATH };
+  }
+  return ACTIVE_FILE;
+}
 
 let browser = null;
 let page = null;
 
-function loadSavedCookies() {
+// Cached session data loaded once at init
+let cachedAuthData = {};
+let cachedStorage = { ls: {}, ss: {} };
+
+/** Load full session: cookies + authData + storage from file */
+function loadSavedSession() {
   try {
-    const data = JSON.parse(fs.readFileSync(DEEPSEEK_ACCOUNTS_FILE, "utf8"));
+    const { file } = resolveActiveFile();
+    if (!fs.existsSync(file)) return null;
+
+    console.log(`[BrowserProxy] Чтение сессии из: ${file}`);
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+
     if (Array.isArray(data) && data.length > 0) {
-      // First account is the latest saved session
-      return data[0].cookies || [];
+      // Find last deepseek_ account (file may contain Qwen accounts too)
+      const dsAccounts = data.filter((a) => a.id?.startsWith("deepseek_") && !a.invalid);
+      if (dsAccounts.length === 0) return null;
+      const acc = dsAccounts[dsAccounts.length - 1];
+      return {
+        cookies: acc.cookies || [],
+        authData: acc.authData || {},
+        storage: acc.storage || { ls: {}, ss: {} },
+      };
     }
-  } catch {}
+  } catch (err) {
+    logWarn(`[BrowserProxy] Ошибка чтения сессии: ${err.message}`);
+  }
   return null;
+}
+
+/** Restore localStorage BEFORE navigation via evaluateOnNewDocument */
+async function restoreLocalStorage(page, storage) {
+  if (!storage || !storage.ls) return;
+
+  const lsEntries = Object.entries(storage.ls);
+  if (lsEntries.length === 0) return;
+
+  // Use evaluateOnNewDocument so localStorage is set BEFORE any site scripts run
+  await page.evaluateOnNewDocument((entries) => {
+    for (const [key, val] of entries) {
+      try {
+        // Restore JSON values as strings
+        const strVal = typeof val === "string" ? val : JSON.stringify(val);
+        if (!localStorage.getItem(key)) localStorage.setItem(key, strVal);
+      } catch {}
+    }
+  }, lsEntries);
+
+  logInfo(`[BrowserProxy] Предварительно загружено ${lsEntries.length} записей localStorage`);
+}
+
+/** Check if user is authenticated via API call (reliable, doesn't depend on cookie flags) */
+async function checkAuthViaApi(page) {
+  try {
+    const result = await page.evaluate(async () => {
+      // Simple HEAD to /api/v0/user — returns 200 if auth works
+      const resp = await fetch("https://chat.deepseek.com/api/v0/user", {
+        credentials: "include",
+        headers: { Accept: "*/*" },
+      });
+      return { status: resp.status, ok: resp.ok };
+    });
+
+    return result.ok;
+  } catch {
+    // Fallback: check if we have cookies at all via page.cookies() is not available in evaluate
+    logDebug("[BrowserProxy] API проверка недоступна, fallback на cookie проверку");
+    const cookies = await page.cookies(CHAT_PAGE_URL);
+    return cookies.some((c) => c.name === "aws-waf-token" || c.name.includes("session"));
+  }
+}
+
+// ─── Context setup: must run BEFORE page creation ──────────
+let contextSetupDone = false;
+
+async function setupExecutionContext() {
+  if (contextSetupDone) return;
+  contextSetupDone = true;
+
+  puppeteer.use(StealthPlugin());
+  browser = await puppeteer.launch({
+    headless: "new",
+    args: ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+  });
 }
 
 export async function initBrowserPage() {
   if (page) return true;
 
   try {
-    puppeteer.use(StealthPlugin());
-    browser = await puppeteer.launch({
-      headless: "new",
-      args: ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-    });
+    // Step 1: Setup browser context first
+    await setupExecutionContext();
 
+    // Load full session data (cookies + authData + storage)
+    const savedSession = loadSavedSession();
+
+    if (savedSession && savedSession.cookies.length > 0) {
+      cachedAuthData = savedSession.authData;
+      cachedStorage = savedSession.storage;
+    } else {
+      logWarn("[BrowserProxy] Сессионные данные не найдены — запуск без авторизации");
+      cachedAuthData = {};
+      cachedStorage = { ls: {}, ss: {} };
+    }
+
+    // Step 2: Create page with interceptors already registered (before any navigation)
     page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
 
-    // Restore saved cookies BEFORE navigation (authentication is in cookies)
-    const savedCookies = loadSavedCookies();
-    if (savedCookies && savedCookies.length > 0) {
-      await page.setCookie(...savedCookies);
-      logInfo(`[BrowserProxy] Загружено ${savedCookies.length} cookie из сессии`);
+    // Restore cookies BEFORE navigation (browser sends them with the request)
+    if (savedSession && savedSession.cookies.length > 0) {
+      await page.setCookie(...savedSession.cookies);
+      logInfo(`[BrowserProxy] Загружено ${savedSession.cookies.length} cookie из сессии`);
     }
 
+    // Step 3: Restore localStorage BEFORE navigation via evaluateOnNewDocument
+    if (cachedStorage.ls && Object.keys(cachedStorage.ls).length > 0) {
+      await restoreLocalStorage(page, cachedStorage);
+    }
+
+    // Step 4: Navigate to DeepSeek
     await page.goto(CHAT_PAGE_URL, { waitUntil: "networkidle2", timeout: 30_000 });
 
-    const loggedIn = await page.evaluate(() => {
-      return !!document.cookie.match(/aws-waf-token/);
+    // Wait for ALL resources to load (including .wasm which DeepSeek fetches dynamically)
+    logInfo("[BrowserProxy] Ожидание полной загрузки ресурсов страницы...");
+    await page.evaluate(async () => {
+      return new Promise((resolve) => setTimeout(resolve, 3000)); // 3s grace period for WASM preload
     });
 
+    // Step 5: Reliable auth check via API instead of document.cookie sniffing
+    const loggedIn = await checkAuthViaApi(page);
+
     if (!loggedIn) {
-      logWarn("[BrowserProxy] Страница не авторизована.");
+      logWarn(
+        "[BrowserProxy] 🔴 Сессия не авторизована. Запустите меню → пункт 1 (Войти в DeepSeek)"
+      );
     } else {
-      logInfo("[BrowserProxy] Браузерная страница готова (авторизован)");
+      logInfo("✅ Браузерная страница готова (авторизован)");
     }
   } catch (err) {
     logWarn("[BrowserProxy] Ошибка инициализации:", err.message);
@@ -95,8 +209,9 @@ async function ensureSession(conversationHint) {
       const text = await resp.text();
       if (!resp.ok) return { error: `HTTP ${resp.status}: ${text.slice(0, 300)}` };
 
+      let json = null;
       try {
-        const json = JSON.parse(text);
+        json = JSON.parse(text);
         // Detect INVALID_TOKEN — session cookies expired, need re-auth
         if (
           json?.code === 40003 ||
@@ -169,19 +284,172 @@ export async function sendViaBrowser(messages, model, conversationHint) {
       `[BrowserProxy] Сессия: ${session.sessionId}${session.parentMessageId ? `, parentMsg: ${session.parentMessageId}` : ``}`
     );
 
+    // Auth data from cached session
+    const authData = { ...cachedAuthData };
+
+    // Find WASM URL inside the browser context (DeepSeek loads it dynamically on every visit)
+    logInfo("[BrowserProxy] Поиск WASM модуля для PoW...");
+    const wasmUrlResult = await page.evaluate(async () => {
+      try {
+        // Method 1: Check performance API for .wasm resources
+        const entries = performance.getEntriesByType("resource");
+        for (const entry of entries) {
+          if (/\.wasm/i.test(entry.name)) return entry.name;
+        }
+      } catch {}
+
+      try {
+        // Method 2: Check all scripts for wasm-related names
+        for (const script of document.querySelectorAll("script[src]")) {
+          const src = script.src.toLowerCase();
+          if (/wasm/.test(src) || /solve/i.test(src)) return script.src;
+        }
+      } catch {}
+
+      try {
+        // Method 3: Look for wasm URLs in global variables set by the app
+        // DeepSeek often stores loaded modules in window objects
+        const win = window;
+        if (win.__DS_WASM_URL__) return win.__DS_WASM_URL__;
+        if (win.deepseekWasmUrl) return win.deepseekWasmUrl;
+      } catch {}
+
+      try {
+        // Method 4: Check loaded modules from service worker or caches
+        for (const cacheName of ["ds-cache", "pow-cache", "app-cache"]) {
+          if (caches) {
+            const cache = await caches.open(cacheName);
+            const keys = await cache.keys();
+            for (const req of keys) {
+              if (/\.wasm/i.test(req.url)) return req.url;
+            }
+          }
+        }
+      } catch {}
+
+      try {
+        // Method 5: DeepSeek may store wasm URL in localStorage or sessionStorage after loading
+        const lsKeys = Object.keys(localStorage);
+        for (const key of lsKeys) {
+          if (/wasm/.test(key)) return localStorage.getItem(key);
+        }
+        const ssKeys = Object.keys(sessionStorage);
+        for (const key of ssKeys) {
+          if (/wasm/.test(key)) return sessionStorage.getItem(key);
+        }
+      } catch {}
+
+      // Method 6: Dump first 20 resources to debug what's loaded
+      try {
+        const entries = performance.getEntriesByType("resource");
+        console.log(
+          "[DEBUG] Loaded resources:",
+          entries.slice(0, 20).map((e) => e.name)
+        );
+      } catch {}
+
+      return null;
+    });
+
+    let powResponseHeader = "";
+    if (wasmUrlResult) {
+      logInfo(`[BrowserProxy] WASM найден: ${wasmUrlResult.slice(0, 60)}...`);
+
+      // Solve PoW challenge INSIDE the browser context using real WASM solver
+      powResponseHeader = await page.evaluate(async (url) => {
+        try {
+          const baseUrl = "https://chat.deepseek.com/api/v0/chat/completion";
+
+          // 1. Get challenge
+          const chalResp = await fetch(baseUrl + "/create_pow_challenge", {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json;charset=UTF-8" },
+            body: JSON.stringify({ target_path: baseUrl }),
+          });
+
+          if (!chalResp.ok) throw new Error(`Challenge failed HTTP ${chalResp.status}`);
+          const chalData = await chalResp.json();
+          const challenge = chalData?.data?.biz_data?.challenge;
+          if (!challenge) throw new Error("No challenge in response");
+
+          // 2. Load and run WASM solver (same logic as chat.js)
+          const wasmResp = await fetch(url);
+          const wasmBytes = await wasmResp.arrayBuffer();
+          const { instance } = await WebAssembly.instantiate(wasmBytes, { wbg: {} });
+          const e = instance.exports;
+
+          const encoder = new TextEncoder();
+          const prefix = challenge.salt + "_" + (challenge.expire_at || "") + "_";
+          const cBytes = encoder.encode(challenge.challenge);
+          const pBytes = encoder.encode(prefix);
+
+          const cP = e.__wbindgen_export_0(cBytes.length, 1) >>> 0;
+          const pP = e.__wbindgen_export_0(pBytes.length, 1) >>> 0;
+          new Uint8Array(e.memory.buffer, cP, cBytes.length).set(cBytes);
+          new Uint8Array(e.memory.buffer, pP, pBytes.length).set(pBytes);
+
+          const sp = e.__wbindgen_add_to_stack_pointer(-16);
+          if (typeof e.wasm_solve !== "function") throw new Error("wasm_solve not found");
+          e.wasm_solve(sp, cP, cBytes.length, pP, pBytes.length, challenge.difficulty || 4096);
+
+          const dv = new DataView(e.memory.buffer);
+          const code = dv.getInt32(sp, true);
+          const ans = dv.getFloat64(sp + 8, true);
+          e.__wbindgen_add_to_stack_pointer(16);
+
+          if (code === 0 || !Number.isFinite(ans) || ans <= 0)
+            throw new Error(`PoW solve failed (code=${code}, ans=${ans})`);
+
+          // 3. Encode as Base64 for header
+          const powData = JSON.stringify({
+            algorithm: challenge.algorithm,
+            challenge: challenge.challenge,
+            salt: challenge.salt,
+            answer: Math.floor(ans),
+            signature: challenge.signature || "",
+            target_path: baseUrl,
+          });
+
+          return btoa(unescape(encodeURIComponent(powData))); // safe Base64 in browser
+        } catch (err) {
+          console.warn("[PoW] Solve failed:", err.message);
+          return null;
+        }
+      }, wasmUrlResult);
+
+      if (powResponseHeader) {
+        logInfo("[BrowserProxy] ✅ PoW решён успешно");
+      } else {
+        logWarn("[BrowserProxy] ⚠️ Не удалось решить PoW — пробуем без заголовка");
+      }
+    } else {
+      logWarn("[BrowserProxy] ⚠️ WASM модуль не найден — PoW пропущен");
+    }
+
+    // Pass PoW header into the evaluation context so it can be added to request
     return await page.evaluate(
-      async ({ prompt, cfg, session }) => {
+      async ({ prompt, cfg, session, authData, powHeader }) => {
         const apiUrl = "https://chat.deepseek.com/api/v0/chat/completion";
 
-        // Extract auth tokens from cookies for Authorization header
-        const getCookie = (name) => {
-          const match = document.cookie.match(
-            new RegExp("(?:^|;)\\s*" + name + "\\s*=\\s*([^;]+)")
-          );
-          return match ? match[1].trim() : null;
-        };
+        // Extract userToken from localStorage (set by PoW interceptor or restored storage)
+        let bearerToken = "";
+        try {
+          const userTokenRaw = localStorage.getItem("userToken");
+          if (userTokenRaw) {
+            try {
+              const parsed = JSON.parse(userTokenRaw);
+              bearerToken = parsed?.value || userTokenRaw;
+            } catch {
+              bearerToken = userTokenRaw;
+            }
+          }
+        } catch {}
 
-        const bearerToken = getCookie("aws-waf-token") || null;
+        // Fallback: use cached authData if localStorage miss (shouldn't happen with restored storage)
+        if (!bearerToken && authData.bearerToken) {
+          bearerToken = authData.bearerToken;
+        }
 
         // Use session ID passed from Node.js layer (created via ensureSession)
         const chatSessionId = session?.sessionId || crypto.randomUUID();
@@ -198,20 +466,32 @@ export async function sendViaBrowser(messages, model, conversationHint) {
           chat_session_id: chatSessionId,
         };
 
+        // Build headers — PoW interceptor adds hif-dliq/hif-leim automatically via fetch override
+        const headers = {
+          Accept: "*/*",
+          "Content-Type": "application/json;charset=UTF-8",
+          Origin: "https://chat.deepseek.com",
+          Referer: "https://chat.deepseek.com/",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="131", "Google Chrome";v="131"',
+          "Sec-Ch-Ua-Mobile": "?0",
+          "Sec-Ch-Ua-Platform": '"Windows"',
+          "x-client-platform": "web",
+        };
+
+        // Add Bearer token if available (for Authorization header)
+        if (bearerToken && !String(headers["Authorization"] || "").startsWith("Bearer")) {
+          headers["Authorization"] = `Bearer ${bearerToken}`;
+        }
+
+        // CRITICAL: Add solved PoW response header (X-DS-PoW-Response) — required by DeepSeek API!
+        if (powHeader) {
+          headers["X-DS-PoW-Response"] = powHeader;
+        }
+
         const response = await fetch(apiUrl, {
           method: "POST",
-          headers: {
-            Accept: "*/*",
-            "Content-Type": "application/json;charset=UTF-8",
-            Origin: "https://chat.deepseek.com",
-            Referer: "https://chat.deepseek.com/",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="131", "Google Chrome";v="131"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "x-client-platform": "web",
-            "x-client-version": "20250611.1",
-          },
+          headers,
           credentials: "include", // send cookies automatically
           body: JSON.stringify(body),
         });
@@ -295,6 +575,16 @@ export async function sendViaBrowser(messages, model, conversationHint) {
                 // Skip thinking elapsed marker
                 if (json.p === "response/thinking_elapsed_secs") continue;
 
+                // CRITICAL: Check for errors in SSE stream (e.g., MISSING_HEADER, INVALID_TOKEN)
+                if (json.code && json.msg) {
+                  throw new Error(`DeepSeek API error: ${json.code} - ${json.msg}`);
+                }
+                if (typeof json === "object" && json.error) {
+                  throw new Error(
+                    `DeepSeek stream error: ${JSON.stringify(json.error).slice(0, 200)}`
+                  );
+                }
+
                 // Debug: capture first chunk structure
                 if (!firstChunkSample) {
                   firstChunkSample = {
@@ -307,9 +597,15 @@ export async function sendViaBrowser(messages, model, conversationHint) {
                 if (json.v && typeof json.v === "string") {
                   fullContent += json.v;
                 }
-              } catch {}
+              } catch (err) {
+                // Only throw real errors, ignore JSON parse failures on partial lines
+                if (!err.message.includes("Unexpected end") && !err.message.includes("JSON")) {
+                  console.error(`[SSE Parser Error]:`, err);
+                  throw err; // Bubble up to break the reader loop
+                }
+              }
             }
-          }
+          } // close while(true)
         } catch (e) {}
 
         return {
@@ -330,6 +626,8 @@ export async function sendViaBrowser(messages, model, conversationHint) {
           search_enabled: cfg.search_enabled ?? false,
         },
         session: { sessionId: session.sessionId, parentMessageId: session.parentMessageId },
+        authData,
+        powHeader: powResponseHeader, // Solve PoW before each request
       }
     );
   } catch (err) {
@@ -344,4 +642,8 @@ export async function shutdownBrowser() {
     browser = null;
     page = null;
   }
+  // Reset all state so next init reloads fresh session data
+  contextSetupDone = false;
+  cachedAuthData = {};
+  cachedStorage = { ls: {}, ss: {} };
 }

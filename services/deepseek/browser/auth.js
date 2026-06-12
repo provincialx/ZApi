@@ -10,8 +10,30 @@ import { CHAT_PAGE_URL, PAGE_TIMEOUT, VIEWPORT_WIDTH, VIEWPORT_HEIGHT } from "..
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Unified accounts storage (Qwen-style)
-const ACCOUNTS_PATH = path.resolve(__dirname, "..", "..", "session");
-const DEEPSEEK_ACCOUNTS_FILE = path.join(ACCOUNTS_PATH, "deepseek_accounts.json");
+// Support BOTH old location (services/session/) and new (project root session/)
+const ACCOUNTS_PATH = path.resolve(__dirname, "..", "..", "session"); // Project root session/
+const LEGACY_ACCOUNTS_PATH = path.resolve(__dirname, "..", "session"); // services/session/ (old location)
+
+// Resolve active file once at module load to prevent split reads/writes
+let ACTIVE_FILE = null;
+function resolveActiveFile() {
+  if (ACTIVE_FILE) return ACTIVE_FILE;
+  const newFile = path.join(ACCOUNTS_PATH, "deepseek_accounts.json");
+  const oldFile = path.join(LEGACY_ACCOUNTS_PATH, "deepseek_accounts.json");
+
+  if (fs.existsSync(newFile)) {
+    ACTIVE_FILE = { file: newFile, dir: ACCOUNTS_PATH };
+  } else if (fs.existsSync(oldFile)) {
+    ACTIVE_FILE = { file: oldFile, dir: LEGACY_ACCOUNTS_PATH };
+  } else {
+    ACTIVE_FILE = { file: newFile, dir: ACCOUNTS_PATH };
+  }
+  return ACTIVE_FILE;
+}
+
+function getAccountsFile() {
+  return resolveActiveFile();
+}
 
 puppeteer.use(StealthPlugin());
 
@@ -20,23 +42,33 @@ let globalBrowser = null;
 // --- Storage Helpers (Qwen-style) ---
 
 function loadAccounts() {
-  if (!fs.existsSync(ACCOUNTS_PATH)) fs.mkdirSync(ACCOUNTS_PATH, { recursive: true });
+  const { file, dir } = getAccountsFile();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-  if (!fs.existsSync(DEEPSEEK_ACCOUNTS_FILE)) {
-    return [];
-  }
+  if (!fs.existsSync(file)) return [];
 
   try {
-    const data = JSON.parse(fs.readFileSync(DEEPSEEK_ACCOUNTS_FILE, "utf8"));
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    console.log(`[DEEPSEEK] Считан файл сессий: ${file}`);
     return Array.isArray(data) ? data : [];
   } catch (err) {
-    logError(`Ошибка чтения ${DEEPSEEK_ACCOUNTS_FILE}`, err);
+    logError(`Ошибка чтения ${file}`, err);
     return [];
   }
 }
 
 function saveAccounts(accounts) {
-  fs.writeFileSync(DEEPSEEK_ACCOUNTS_FILE, JSON.stringify(accounts, null, 2), "utf8");
+  try {
+    const { file, dir } = resolveActiveFile();
+    // Ensure directory exists
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(file, JSON.stringify(accounts, null, 2), "utf8");
+    console.log(`[DEEPSEEK] Файл сохранен: ${file} (${accounts.length} аккаунтов)`);
+  } catch (e) {
+    logError("КРИТ: Не удалось сохранить файл deepseek_accounts.json!", e);
+  }
 }
 
 export async function initAuthBrowser() {
@@ -189,7 +221,7 @@ async function enableNetworkCapture(page) {
     // Track requests — captures all deepseek.com request headers
     cdpSession.on("Network.requestWillBeSent", (params) => {
       const url = params.request?.url || "";
-      if (/\.wasm/i.test(url)) {
+      if (/\\.wasm/i.test(url)) {
         wasmResourceUrls.push(url);
         logInfo(`[Auth] CDP: Found WASM resource: ${url.slice(0, 120)}`);
       }
@@ -209,12 +241,29 @@ async function enableNetworkCapture(page) {
       }
     });
 
-    // Capture final headers (JS-modified). Use requestSent event.
-    cdpSession.on("Network.dataSent", (params) => {
+    // Capture headers AFTER JS modification — extraInfoReceived fires after fetch/XHR interceptors run!
+    cdpSession.on("Network.extraInfoReceived", (params) => {
       const reqInfo = _requestMap.get(params.requestId);
       if (!reqInfo) return;
-      // dataSent has less useful info, but logs POST body sends
-      logDebug(`[Auth] CDP dataSent: ${reqInfo.method} ${reqInfo.url.slice(0, 40)}`);
+
+      const headersAfterNet = params.headers || {}; // These are the FINAL headers with hif_*!
+
+      logDebug(
+        `[Auth] CDP extraInfo: ${reqInfo.url.slice(0, 60)} keys=[${Object.keys(headersAfterNet).join(", ")}]`
+      );
+
+      if (headersAfterNet) {
+        // Store final headers — they contain PoW data added by JS interceptors
+        reqInfo.finalHeaders = { ...(reqInfo.finalHeaders || reqInfo.headers), ...headersAfterNet };
+
+        // Update in networkEvents too (find matching event)
+        for (const ev of networkEvents) {
+          if (ev.url === reqInfo.url && ev.timestamp === reqInfo.timestamp) {
+            ev.finalHeaders = reqInfo.finalHeaders;
+            break;
+          }
+        }
+      }
     });
 
     // Capture response status for API calls (debug only)
@@ -232,7 +281,7 @@ async function enableNetworkCapture(page) {
   }
 }
 
-// Extract PoW data from CDP-requestWillBeSent events (non-blocking observer format)
+// Extract PoW data from CDP events (includes finalHeaders from extraInfoReceived)
 function extractPoWFromNetworkEvents() {
   let hif_dliq = "";
   let hif_leim = "";
@@ -243,12 +292,23 @@ function extractPoWFromNetworkEvents() {
     wasmUrl = wasmResourceUrls[wasmResourceUrls.length - 1];
   }
 
-  // Extract hif headers from CDP events — requestWillBeSent sees headers after JS adds them
   for (const event of networkEvents) {
-    const hdrs = event.headers || {};
-    for (const [k, v] of Object.entries(hdrs)) {
-      if (k.toLowerCase() === "x-hif-dliq" && !hif_dliq) hif_dliq = String(v);
-      if (k.toLowerCase() === "x-hif-leim" && !hif_leim) hif_leim = String(v);
+    // Check BOTH initial headers AND finalHeaders (from extraInfoReceived, post-JS-modification)
+    const allHdrs = [event.headers || {}, event.finalHeaders || {}];
+
+    for (const hdrs of allHdrs) {
+      if (!hdrs) continue;
+      for (const [k, v] of Object.entries(hdrs)) {
+        const lower = k.toLowerCase();
+        if (lower === "x-hif-dliq" && !hif_dliq) {
+          hif_dliq = String(v);
+          logInfo(`[Auth] Found x-hif-dliq in ${event.url.slice(0, 50)} (${lower})`);
+        }
+        if (lower === "x-hif-leim" && !hif_leim) {
+          hif_leim = String(v);
+          logInfo(`[Auth] Found x-hif-leim in ${event.url.slice(0, 50)} (${lower})`);
+        }
+      }
     }
   }
 
@@ -268,10 +328,17 @@ function extractHifFromCaptured(capturedHeaders = {}) {
 }
 async function extractSessionToAccount(page, networkData = {}) {
   try {
-    const cookies = await page.cookies(CHAT_PAGE_URL);
-    if (!cookies.length) return false;
+    // Try specific domain first, fallback to ALL cookies (DeepSeek may set on .deepseek.com)
+    let cookies = await page.cookies(CHAT_PAGE_URL);
+    if (!cookies.length) {
+      logWarn("[Auth] Куки для точного домена не найдены — получаю все куки страницы");
+      cookies = await page.cookies(); // No domain filter
+    }
 
-    // Extract localStorage and sessionStorage data (contains auth token, wasmUrl, headers)
+    if (!cookies.length) {
+      logError("[Auth] Нет cookie на странице. Возможно, вход не прошёл.");
+      return false;
+    }
     const rawData = await page.evaluate(() => {
       const result = { ls: {}, ss: {} };
 
@@ -515,8 +582,9 @@ async function extractSessionToAccount(page, networkData = {}) {
       resetAt: null,
     });
 
+    const { file } = resolveActiveFile();
     saveAccounts(filtered);
-    logInfo("Аккаунт DeepSeek сохранен в " + DEEPSEEK_ACCOUNTS_FILE);
+    logInfo(`Аккаунт DeepSeek сохранен: ${file}`);
 
     return true;
   } catch (err) {
@@ -551,6 +619,9 @@ export async function addAccountInteractive() {
     await enableNetworkCapture(page);
 
     await page.goto(CHAT_PAGE_URL, { waitUntil: "networkidle2", timeout: 30000 });
+
+    // Install post-load interceptors AFTER navigation (catches bundled fetch/XHR)
+    await injectPostLoadCapture(page);
 
     console.log("\n------------------------------------------------------");
     console.log("               ОЖИДАНИЕ ВХОДА В DEEPSEEK");
@@ -629,21 +700,31 @@ export async function addAccountInteractive() {
       `[Auth] CDP capture: wasm=${!!cdpPoW.wasmUrl}, hif_dliq=${!!cdpPoW.hif_dliq}, hif_leim=${!!cdpPoW.hif_leim}, events=${networkEvents.length}`
     );
 
-    // Source 3: Fallback — performance.getEntriesByType for wasmUrl (last resort)
-    const fallbackWasm = await page.evaluate(() => {
-      return (
-        performance
-          .getEntriesByType("resource")
-          .map((r) => r.name)
-          .find((u) => /\.wasm/.test(u)) || ""
-      );
+    // Source 3: Find WASM URL from page resources (performance API + script tags)
+    const resourceWasm = await page.evaluate(() => {
+      // Check all loaded resources via performance.getEntriesByType
+      try {
+        const entries = performance.getEntriesByType("resource");
+        for (const entry of entries) {
+          if (/\.wasm/i.test(entry.name)) return entry.name;
+        }
+      } catch {}
+
+      // Check script tags for wasm references
+      try {
+        for (const script of document.querySelectorAll("script[src]")) {
+          if (/wasm.*solve|pow.*wasm/.test(script.src)) return script.src;
+        }
+      } catch {}
+
+      return null;
     });
 
     // === Merge: priority order for each field ===
     const mergedPoW = {
       hif_dliq: jsHif.hif_dliq || cdpPoW.hif_dliq || "",
       hif_leim: jsHif.hif_leim || cdpPoW.hif_leim || "",
-      wasmUrl: cdpPoW.wasmUrl || fallbackWasm || "", // CDP wasm is more reliable
+      wasmUrl: resourceWasm || cdpPoW.wasmUrl || "", // Resource-based is most reliable
     };
 
     logInfo(
