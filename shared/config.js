@@ -11,4 +11,4 @@ export const LOG_MAX_SIZE = Number(process.env.LOG_MAX_SIZE ?? 5 * 1024 * 1024);
 export const LOG_MAX_FILES = Number(process.env.LOG_MAX_FILES ?? 5);
 
 // Logs directory — relative to project root (resolved at runtime)
-export const LOGS_DIR = "freeqwenapi/logs";
+export const LOGS_DIR = "zapi/logs";

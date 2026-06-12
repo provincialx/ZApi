@@ -88,7 +88,7 @@ async function streamChat(userMessage) {
 
 async function main() {
   console.log("╔════════════════════════════════════════╗");
-  console.log("║  FreeQwenApi - Interactive Chat        ║");
+  console.log("║  ZApi - Interactive Chat                ║");
   console.log('║  Type "exit" to quit                   ║');
   console.log("╚════════════════════════════════════════╝\n");
 

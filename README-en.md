@@ -1,4 +1,4 @@
-# FreeQwenApi — Local OpenAI-Compatible API via Qwen Chat
+# ZApi — Local OpenAI-Compatible API via Qwen Chat
 
 ![Contact](https://img.shields.io/badge/Contact-mandrykinsergey@-blue)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-green)
@@ -11,7 +11,7 @@
 
 Zed.dev is one of the fastest code editors available. It has a built-in AI agent that can read files, run terminal commands, and write code based on your prompts. But **Zed doesn't include a model** — it just talks to an OpenAI-compatible API.
 
-FreeQwenApi bridges Zed and the Qwen Chat web app (`chat.qwen.ai`). It launches a headless browser, authenticates with your Qwen account, and serves model responses at `http://localhost:3264/api` in standard OpenAI format.
+ZApi bridges Zed and the Qwen Chat web app (`chat.qwen.ai`). It launches a headless browser, authenticates with your Qwen account, and serves model responses at `http://localhost:3264/api` in standard OpenAI format.
 
 **Result:** Zed Agent gets full access to Qwen's powerful models — it can read your codebase, edit files, and run terminal commands as a fully autonomous agent. All for free (using a basic Qwen Chat account).
 
@@ -20,7 +20,7 @@ FreeQwenApi bridges Zed and the Qwen Chat web app (`chat.qwen.ai`). It launches 
 **Why this fork?** Most forks only return plain text. This one adds full `tool calling` — the model can invoke external tools (`read_file`, `write_file`, `terminal`) and operate in an automatic agent-loop cycle. That's the key advantage over other projects.
 
 ```text
-Zed Agent    →  FreeQwenApi (localhost:3264)  →  Headless Browser (Puppeteer)  →  chat.qwen.ai
+Zed Agent    →  ZApi (localhost:3264)  →  Headless Browser (Puppeteer)  →  chat.qwen.ai
          ↑_________________________________________________________↓___________________________↓
                               Response + tool calls (OpenAI format)
 ```
@@ -31,8 +31,8 @@ Requires [Node.js](https://nodejs.org/) version 18+.
 
 ### 1. Install and first run
 ```bash
-git clone https://github.com/provincialx/FreeQwenApi
-cd FreeQwenApi
+git clone https://github.com/provincialx/ZApi
+cd ZApi
 npm install
 ```
 
@@ -75,7 +75,7 @@ npm run smoke
 
 Zed Agent can invoke external tools using the standard OpenAI tool calling protocol: reading files, writing code, running terminal commands. The model decides which tools to call, invokes them through Zed, receives results, and continues working — all automatically (agent loop).
 
-**The challenge:** Qwen Chat's web API **does not accept tools** in standard OpenAI format (`"Tool X does not exists"`). FreeQwenApi works around this without quality loss:
+**The challenge:** Qwen Chat's web API **does not accept tools** in standard OpenAI format (`"Tool X does not exists"`). ZApi works around this without quality loss:
 1. Tool schemas are injected into the user message as text instructions (prompt injection).
 2. Qwen generates tool calls as a JSON block within its normal text response.
 3. The proxy parses this block, strips extraneous text, and returns clean `tool_calls` to Zed Agent in OpenAI format.
@@ -84,7 +84,7 @@ Works reliably even with large tool lists thanks to schema compression (`MAX_SCH
 
 ## Multi-Account & Rate Limits
 
-Free and basic Qwen accounts have per-minute/per-hour request limits. FreeQwenApi supports multiple accounts simultaneously:
+Free and basic Qwen accounts have per-minute/per-hour request limits. ZApi supports multiple accounts simultaneously:
 - `npm run auth -- --add` — add a new account.
 - When the current account hits its limit → the server automatically switches to the next available account (round-robin rotation).
 - Account statuses are tracked: `OK` / `WAIT` / `INVALID`.
@@ -106,7 +106,7 @@ Free and basic Qwen accounts have per-minute/per-hour request limits. FreeQwenAp
 
 - **Unofficial proxy.** Qwen may change site structure or internal API URLs at any time. The project adapts to these changes, but you may need to pull updates from the repository.
 - **Stale personalization context.** If your Qwen account has accumulated many old conversations and personalization data, the model (especially `qwen3.7-max`) may occasionally ignore instructions and respond with plain text instead of tool calls. Clearing site cookies/cache in your browser or switching to `qwen3-coder-plus` resolves this instantly.
-- **Race condition ("in progress").** Qwen processes SSE sessions for a few seconds after delivering the full response. If you send the next request within milliseconds, the server returns `"chat is in progress"`. FreeQwenApi automatically pauses (~1-2s) and retries on the same chat to preserve conversation context (see docs).
+- **Race condition ("in progress").** Qwen processes SSE sessions for a few seconds after delivering the full response. If you send the next request within milliseconds, the server returns `"chat is in progress"`. ZApi automatically pauses (~1-2s) and retries on the same chat to preserve conversation context (see docs).
 - **Browser memory.** During very long continuous sessions (>100 consecutive calls), Chromium consumes more RAM. The built-in garbage collector closes pages idle for more than 5 minutes, and a hard limit of 5 concurrent pages prevents OOM crashes. Automatic restart triggers when RSS exceeds 512 MB.
 
 ## Developer Documentation

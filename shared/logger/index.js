@@ -7,7 +7,7 @@ import { LOG_LEVEL, LOG_MAX_SIZE, LOG_MAX_FILES, LOGS_DIR } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Resolve logs dir relative to project root (two levels up: shared -> FreeQwenApi)
+// Resolve logs dir relative to project root (two levels up: shared -> ZApi)
 const LOG_DIR = path.resolve(__dirname, "..", "..", LOGS_DIR);
 if (!fs.existsSync(LOG_DIR)) {
   fs.mkdirSync(LOG_DIR, { recursive: true });

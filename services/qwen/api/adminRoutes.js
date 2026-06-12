@@ -24,7 +24,7 @@ router.get("/health", async (req, res) => {
 
     res.json({
       ok: availableAccounts > 0,
-      service: "FreeQwenApi",
+      service: "ZApi",
       watermark: FORGETMEAI_WATERMARK,
       baseUrl: "/api",
       models: modelData.models.length,

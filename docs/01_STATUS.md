@@ -1,4 +1,4 @@
-# FreeQwenApi — Status (2026-06-12)
+# ZApi — Status (2026-06-12)
 
 ## Health: GREEN — DeepSeek direct API mode (2026-06-12)
 

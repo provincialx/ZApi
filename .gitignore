@@ -51,4 +51,4 @@ venv/
 # Auth artifacts
 src/Authorization.txt
 accounts
-/freeqwenapi/*
+/zapi/*
