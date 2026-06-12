@@ -77,6 +77,13 @@ app.post("/api/v1/chat/completions", async (req, res) => {
   const model = req.body?.model || "deepseek-v3";
   const isStreaming = req.body?.stream === true;
 
+  // Extract conversation hint from headers or body for persistent chat sessions on DeepSeek web side
+  const conversationHint =
+    req.headers["x-conversation-id"] ||
+    req.headers["x-chat-id"] ||
+    req.body?.metadata?.conversation_id ||
+    null;
+
   // Force Puppeteer mode — browser page.solveChatMessage() handles PoW automatically
   logInfo("[Proxy] Маршрутизация через браузер (PoW авто-решение)");
 
@@ -116,14 +123,27 @@ app.post("/api/v1/chat/completions", async (req, res) => {
 
   try {
     // Send message through authenticated browser context (bypasses PoW validation)
-    const apiResult = await sendViaBrowser(messages, model);
+    const apiResult = await sendViaBrowser(messages, model, conversationHint);
 
     if (!apiResult?.success) {
       logWarn(`DeepSeek ${model}: Browser API returned error — ${apiResult.error}`);
       return res.status(502).json({ error: apiResult.error });
     }
 
-    const fullContent = apiResult.data.content;
+    const fullContent = apiResult.data.content || "";
+
+    // Debug only: diagnose empty responses from browser proxy
+    if (!fullContent && apiResult._debug) {
+      const dbg = apiResult._debug;
+      logWarn(`[Debug] Пустой ответ! contentType=${dbg.contentType}`);
+      if (dbg.keys) logInfo(`[Debug] JSON keys: ${dbg.keys.join(", ")}`);
+      if (dbg.sample)
+        logInfo(
+          `[Debug] Sample (${dbg.rawLength ?? dbg.sample.length}): ${dbg.sample?.slice(0, 500) || ""}`
+        );
+      if (dbg.firstChunk)
+        logInfo(`[Debug] First SSE chunk keys: ${JSON.stringify(dbg.firstChunk.keys)}`);
+    }
 
     if (!isStreaming) {
       // Non-streaming response
@@ -196,7 +216,7 @@ app.post("/api/v1/chat/completions", async (req, res) => {
       res.write(doneChunk);
       res.end();
       logInfo(
-        `DeepSeek ${model}: ответ за ${(Date.now() - startTime / 1000).toFixed(1)}с (${fullContent.length} симв)`
+        `DeepSeek ${model}: ответ за ${((Date.now() - startTime) / 1000).toFixed(1)}с (${fullContent.length} симв)`
       );
     }
   } catch (err) {
