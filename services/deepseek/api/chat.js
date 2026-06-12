@@ -342,6 +342,15 @@ async function executeApiRequest(content, model, cookieStr, authData = {}, onChu
       headers["X-DS-PoW-Response"] = powResponseHeader;
     }
 
+    // Debug: log all sent headers for MISSING_HEADER diagnosis
+    const debugHeadersSent = {};
+    for (const [k, v] of Object.entries(headers)) {
+      if (k === "Authorization") debugHeadersSent[k] = v.slice(0, 20) + "...";
+      else if (k === "Cookie") debugHeadersSent[k] = `${v.slice(0, 40)}... (${v.length} chars)`;
+      else debugHeadersSent[k] = String(v).slice(0, 50);
+    }
+    logWarn(`[DeepSeek] Заголовки отправки: ${JSON.stringify(debugHeadersSent)}`);
+
     const response = await fetch(CHAT_API_URL, {
       method: "POST",
       headers,
@@ -354,10 +363,17 @@ async function executeApiRequest(content, model, cookieStr, authData = {}, onChu
     if (!response.ok) {
       const errorText = await response.text();
       logError(`DeepSeek API ошибка: ${response.status} - ${errorText.slice(0, 200)}`);
+      // Log full error for MISSING_HEADER diagnosis
+      logWarn(`[DeepSeek] Ошибка HTTP ${response.status}:`);
+      logWarn(
+        `  Заголовки отправки: Accept=${headers.Accept}, Cookie=(${cookieStr.length} chars), hif-dliq=${!!headers["hif-dliq"] || authData.hif_dliq ? "yes" : "no"}, PoW=${!!powResponseHeader}`
+      );
+      logWarn(`  Ответ сервера: ${errorText.slice(0, 200)}`);
+
       return {
         success: false,
         status: response.status,
-        errorBody: `HTTP ${response.status}: ${errorText.slice(0, 500)}`,
+        errorBody: `HTTP ${response.status}: ${errorText}`, // Full text for diagnosis
       };
     }
 
@@ -466,7 +482,12 @@ async function handleNonSseResponse(response, onChunk) {
 
   // DeepSeek JSON responses have format:
   // { "code": 0, "data": { "delta": "text" }, ... }
-  logInfo(`[Debug/JSON] Raw response (${text.length} chars): ${text.slice(0, 300)}`);
+  // Log full JSON for MISSING_HEADER diagnosis
+  if (text.includes("MISSING") || text.includes("403")) {
+    logWarn(`[DeepSeek] Полный ответ: ${text}`);
+  } else {
+    logInfo(`[Debug/JSON] Raw response (${text.length} chars): ${text.slice(0, 300)}`);
+  }
 
   let content = text;
 
