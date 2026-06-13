@@ -262,43 +262,58 @@ function _makeCallSig(name, args) {
   return `${name}:${normalized.substring(0, 200)}`;
 }
 
-/** Collect tool result signatures from the most recent assistant+tool turn. */
-function _currentToolResultSignatures(messages) {
+/**
+ * Collect tool result signatures from ALL turns in conversation history.
+ * Uses tool_call_id matching (not fragile name field) for reliable detection.
+ * Returns Set of "name:serialized_args" strings for all completed tool calls.
+ */
+function _allToolResultSignatures(messages) {
   const msgs = messages || [];
-  let lastAssistIdx = -1;
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (
-      msgs[i]?.role === "assistant" &&
-      (msgs[i].tool_calls?.length > 0 || msgs[i].function_call)
-    ) {
-      lastAssistIdx = i;
-      break;
-    }
-  }
-  if (lastAssistIdx < 0) return new Set();
+  const allSigs = new Set();
 
-  const sigs = new Set();
-  // Get the assistant's tool_calls to match arguments
-  const assistMsg = msgs[lastAssistIdx];
-  const prevCallsByNameArgs = new Map();
-  if (assistMsg?.tool_calls) {
-    for (const tc of assistMsg.tool_calls) {
-      const fnName = tc?.function?.name ?? tc?.name;
-      const fnArgs = tc?.function?.arguments ?? tc?.arguments ?? "{}";
-      prevCallsByNameArgs.set(fnName, fnArgs);
+  // Build a map of tool_call_id -> {name, args} from all assistant messages
+  const callMap = new Map();
+
+  for (let i = 0; i < msgs.length; i++) {
+    const msg = msgs[i];
+
+    // Collect tool call definitions from assistant messages
+    if (msg?.role === "assistant" && msg?.tool_calls?.length > 0) {
+      for (const tc of msg.tool_calls) {
+        const tcId = tc.id;
+        if (!tcId) continue;
+        const fnName = tc?.function?.name ?? tc?.name;
+        const fnArgs = tc?.function?.arguments ?? tc?.arguments ?? "{}";
+        let argsObj;
+        try {
+          argsObj = typeof fnArgs === "string" ? JSON.parse(fnArgs) : fnArgs;
+        } catch {
+          argsObj = {};
+        }
+        if (fnName) {
+          callMap.set(tcId, { name: fnName, args: argsObj });
+        }
+      }
+    }
+
+    // Match tool results with their corresponding calls by tool_call_id
+    if (msg?.role === "tool" && msg?.tool_call_id) {
+      const tcId = msg.tool_call_id;
+      const callInfo = callMap.get(tcId);
+      if (callInfo) {
+        const sig = _makeCallSig(callInfo.name, callInfo.args);
+        if (sig) allSigs.add(sig);
+      } else {
+        // Fallback: use name field if tool_call_id not found in map
+        if (msg.name) {
+          const sig = _makeCallSig(msg.name, {});
+          if (sig) allSigs.add(sig);
+        }
+      }
     }
   }
 
-  for (let i = lastAssistIdx + 1; i < msgs.length; i++) {
-    if (msgs[i]?.role === "tool" || msgs[i]?.role === "function") {
-      const name = msgs[i].name;
-      // Use the stored arguments from the assistant's tool_calls for signature matching
-      const args = prevCallsByNameArgs.get(name) ?? "{}";
-      const sig = _makeCallSig(name, typeof args === "string" ? JSON.parse(args) : args);
-      if (sig) sigs.add(sig);
-    }
-  }
-  return sigs;
+  return allSigs;
 }
 
 /**
@@ -307,7 +322,7 @@ function _currentToolResultSignatures(messages) {
  * Matches Python fork's repeated_current_tool_calls().
  */
 export function getRepeatedToolCalls(calls, messages) {
-  const previousSigs = _currentToolResultSignatures(messages);
+  const previousSigs = _allToolResultSignatures(messages);
   if (previousSigs.size === 0) return [];
 
   const repeated = [];

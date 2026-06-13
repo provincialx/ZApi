@@ -1,5 +1,13 @@
 # 04 — Changelog
 
+## Anti-loop detection fixed + cross-turn repeat guard (2026-06-14)
+
+- **`openaiUtils.js`** — Fixed `_allToolResultSignatures()` (was `_currentToolResultSignatures`):
+  - **Баг: детекция повторов никогда не работала.** Tool-результаты от Zed не содержат поле `name`, только `tool_call_id`. Старая функция искала `msgs[i].name` → `undefined` → сигнатура `null` → анти-луп гард всегда пропускал повторы.
+  - Заменил на матчинг по `tool_call_id` (из assistant.tool_calls → tool.tool_call_id), что гарантирует нахождение имени вызванной функции.
+  - Заменил проверку только последнего оборота на сканирование ВСЕЙ истории — теперь ловит многошаговые циклы (read_file A → read_file B → read_file A).
+- **`routes.js`** — Добавлен анти-луп гард (`getRepeatedToolCalls`) в non-streaming path. Ранее проверка была только в SSE-пути, не-streaming запросы возвращали повторные tool_calls без фильтрации.
+
 ## Tool prompt fix + file cache for agent-loop stability (2026-06-14)
 
 - **`toolUtils.js`** — Fixed `toolsToPrompt()`: rewrote from Russian to English, clarified JSON format with concrete example, removed negative phrasing. Language matches system message for better model compliance.

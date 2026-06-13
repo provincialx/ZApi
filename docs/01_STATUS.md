@@ -1,6 +1,6 @@
 # ZApi — Status (2026-06-14)
 
-## Health: GREEN — Tool prompt fix + file cache for agent-loop stability
+## Health: GREEN — Anti-loop detection fixed + cross-turn repeat guard
 
 ### Architecture S61+: Multi-Provider Separation
 
@@ -10,13 +10,13 @@ Process-level isolation via `index.js` dispatcher → `child_process.fork()`. Ea
 |------|--------|-------|
 | Multi-provider architecture | Working | `index.js` → forks Qwen/DeepSeek as isolated child processes with signal forwarding |
 | Tool calling (SSE + streaming) | Working | Qwen: prompt injection + JSON parse roundtrip via `toolUtils.js`. DeepSeek: native OpenAI tool_calls pass-through. |
-| Agent-loop stability | Working | Qwen: deferred auto-reset, cooldown, same-chat retry on "in progress". DeepSeek: N/A (single-message model). |
+| Agent-loop stability | Working | Qwen: deferred auto-reset, cooldown, same-chat retry on "in progress". Anti-loop guard fixed: now scans ALL history via tool_call_id matching, covers non-streaming path. DeepSeek: N/A (single-message model). |
 | Chat management | Working | Qwen: layered fallback (chatIdMap → modelDefaultChats → create new). Cross-account auth fixed. DeepSeek: simple in-memory Map. |
 | Page pool memory (Qwen) | Mitigated | Pool size=3 idle, max 5 concurrent. Idle TTL 5min, GC every 60s, Memory Guard RSS restart at 512MB. |
 | Timeout enforcement | Active | `REQUEST_TIMEOUT_MINUTES` (5m) wrapper + protocolTimeout synced. Path 2 fetch timeout 20s. |
 | CAPTCHA resolver (Qwen) | Working | Centralized `resolveCaptchaAndRetry()`, JWT inject, `SIMULATE_CAPTCHA` test mode. |
 | Aliyun WAF bypass (Qwen) | Working | Path 2: `fetch()` in main world via WAF SDK, no `Authorization: Bearer`, `networkidle0` + 2s pause. |
-| Unit tests | Passing | 46/46 (`npm test`) |
+| Unit tests | Passing | 46/46 (`npm test`). Anti-loop tests cover all-turn detection with tool_call_id matching. |
 | ESLint | Clean | 0 errors, ~37 warnings (unused imports — tech-debt) |
 | Logging isolation | Working | Per-service log dirs: `logs/qwen/`, `logs/deepseek/` via `LOGS_DIR` env |
 | Prettier | Formatted | All files clean |

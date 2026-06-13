@@ -12,6 +12,7 @@
 | D4 | `MAX_HISTORY_LENGTH=100` but sliding window triggers at 60 | `chatHistory.js` vs `routes.js` | Two different history limits — may conflict. |
 | D5 | Memory Guard срабатывает, но не освобождает память сразу | `pagePool.js` | restartBrowserIfLeaking завершает старый браузер, но RSS остаётся высоким до GC Node.js. |
 | D6 | `testToken` в `adminRoutes.js` — вызывает независимый API запрос | `adminRoutes.js` | Тестирование токена через Qwen API — может ошибочно маркировать валидный токен как INVALID при временных сетевых ошибках. |
+| D12 | `fileCache.js` функции `getCachedToolResults()`/`buildCachedToolResultMessages()` не подключены | `fileCache.js` | Кеш заполняется (`populateCacheFromMessages`), но никогда не читается. Модель не может получить кешированное содержимое файлов без roundtrip. |
 
 ### Low priority (monitor)
 

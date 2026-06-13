@@ -726,7 +726,36 @@ router.post("/chat/completions", async (req, res) => {
         }
       }
 
+      // Anti-loop: detect repeated tool calls (same as streaming path)
       if (toolCalls && toolCalls.length > 0) {
+        const repeated = getRepeatedToolCalls(toolCalls, messages);
+        if (repeated.length > 0) {
+          logInfo(`🔁 Anti-loop guard (non-stream): ${repeated.join(", ")} уже выполнялись`);
+          const fallbackContent =
+            parts?.visible ||
+            "Останавливаю повторные вызовы инструментов. Модель получила результат — перейди к следующему шагу.";
+          return res.json({
+            id: result.id || "chatcmpl-" + Date.now(),
+            object: "chat.completion",
+            created: Math.floor(Date.now() / 1000),
+            model: mappedModel || "qwen-max-latest",
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: fallbackContent },
+                finish_reason: "stop",
+              },
+            ],
+            usage: result.usage || {
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+            },
+            chatId: result.chatId,
+            parentId: result.parentId,
+          });
+        }
+
         return res.json(buildOpenAIToolResponse(result, mappedModel, toolCalls, parts.visible));
       }
 
