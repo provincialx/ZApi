@@ -52,8 +52,11 @@ async function main() {
 
   const servicePath = path.default.resolve(process.cwd(), service.entry);
 
-  // Forward env vars to child
-  const childEnv = { ...process.env };
+  // Forward env vars to child, override LOGS_DIR for per-service log isolation
+  const childEnv = {
+    ...process.env,
+    LOGS_DIR: "logs/" + service.id,
+  };
 
   const child = fork(servicePath, [], {
     cwd: process.cwd(),
@@ -70,7 +73,7 @@ async function main() {
     if (signal) {
       console.log(`\n⚡ Прокси остановлен сигналом: ${signal}`);
     } else if (code !== 0 && code !== null) {
-      console.log(`\n⚠️ Прoksi завершён с кодом: ${code}`);
+      console.log(`\n⚠️ Прокси завершён с кодом: ${code}`);
       process.exit(code);
     }
   });

@@ -613,19 +613,21 @@ async function executeApiRequestWithNodeStreaming(apiUrl, payload, onChunk = nul
 
 // Aliyun WAF blocks pure Node.js fetch. Must run INSIDE browser context.
 // protocolTimeout is set to 15+ min in browser.js so long SSE streams don't break the CDP link.
-async function executeApiRequest(page, apiUrl, payload, onChunk = null) {
+async function executeApiRequest(page, apiUrl, payload, onChunk = null, authToken = null) {
   logDebug(`API URL: ${apiUrl}`);
 
   // Path 2 (browser fetch) — uses page's native fetch wrapped by WAF SDK.
   // WAF SDK adds bx-ua, bx-umidtoken, bx-v headers automatically.
-  // Auth is via cookies (credentials: "include"), no Bearer token needed.
+  // Auth is via cookies (credentials: "include") AND Bearer token when provided.
+  // Bearer token ensures the request authenticates as the account that owns the chat,
+  // preventing cross-account "chat not exist" errors when browser cookies differ.
   // WAF либо блокирует за секунды, либо пускает. 20s достаточно.
   // Настраивается через PATH2_FETCH_TIMEOUT (env).
   const FETCH_TIMEOUT_MS = Number(process.env.PATH2_FETCH_TIMEOUT) || 20_000;
   // Overall evaluate timeout — don't let Path 2 hang the main request.
   const PATH2_EVALUATE_TIMEOUT = Number(process.env.PATH2_EVALUATE_TIMEOUT) || 60_000;
 
-  const requestBody = { apiUrl, payload, fetchTimeout: FETCH_TIMEOUT_MS };
+  const requestBody = { apiUrl, payload, fetchTimeout: FETCH_TIMEOUT_MS, authToken };
 
   // Use main-world injection via addScriptTag + DOM event bridge.
   // page.evaluate() runs in isolated world where fetch is NOT wrapped by WAF SDK.
@@ -640,18 +642,24 @@ async function executeApiRequest(page, apiUrl, payload, onChunk = null) {
           var d = e.detail;
           try {
             // Use page's native fetch — WAF SDK has already wrapped it to add bx-* headers
+            var fetchHeaders = {
+              "Content-Type": "application/json",
+              "Accept": "*/*",
+              "Origin": "https://chat.qwen.ai",
+              "Referer": "https://chat.qwen.ai/",
+              "Version": "0.2.64",
+              "source": "web",
+              "X-Request-Id": crypto.randomUUID(),
+              "X-Accel-Buffering": "no"
+            };
+            // Bearer token ensures the request authenticates as the account that owns the chat.
+            // Prevents cross-account "chat not exist" errors when browser cookies differ from the token account.
+            if (d.authToken) {
+              fetchHeaders["Authorization"] = "Bearer " + d.authToken;
+            }
             var response = await fetch(d.url, {
               method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Accept": "*/*",
-                "Origin": "https://chat.qwen.ai",
-                "Referer": "https://chat.qwen.ai/",
-                "Version": "0.2.64",
-                "source": "web",
-                "X-Request-Id": crypto.randomUUID(),
-                "X-Accel-Buffering": "no"
-              },
+              headers: fetchHeaders,
               body: JSON.stringify(d.payload),
               credentials: "include"
             });
@@ -710,6 +718,7 @@ async function executeApiRequest(page, apiUrl, payload, onChunk = null) {
                 url: data.apiUrl,
                 payload: data.payload,
                 timeout: data.fetchTimeout || 60000,
+                authToken: data.authToken || null,
               },
             })
           );
@@ -1001,11 +1010,24 @@ export async function sendMessage(
   onChunk = null,
   preferredOwnerId = null
 ) {
+  // Remember original chatId BEFORE new-chat creation below.
+  // Used by didCreateChatInternally() so persistSessionState knows when
+  // sendMessage created a new chat internally (vs reusing existing).
+  const _origChatId = chatId;
+
   if (!chatId) {
     const newChatResult = await createChatV2(model, "Новый чат", 0);
     if (newChatResult.error) return { error: "Не удалось создать чат: " + newChatResult.error };
     chatId = newChatResult.chatId;
     logInfo(`Создан новый чат v2 с ID: ${chatId}`);
+  }
+
+  // Tell caller whether a new Qwen chat was created by sendMessage itself.
+  // Without this, persistSessionState in routes.js can't distinguish
+  // "sendMessage created a fresh chat" from "caller already provided one",
+  // so the model default chat is never saved → every request creates a new chat.
+  function didCreateChatInternally() {
+    return !_origChatId;
   }
 
   const validated = validateAndPrepareMessage(message);
@@ -1112,6 +1134,23 @@ export async function sendMessage(
       logWarn(`🟡 Browser fallback forced: ${reason} → executeApiRequest on main context`);
       try {
         // Use the main authenticated page directly.
+        // Sync correct auth token into the browser page BEFORE navigation.
+        // Qwen uses localStorage token for API auth. Without this, the page may load
+        // with a different account's session (from cookies), causing cross-account
+        // "chat not exist" after createChatV2 used a different account's Bearer token.
+        if (tokenObj?.token) {
+          try {
+            await browserContext.evaluate((t) => {
+              try {
+                localStorage.setItem("token", t);
+              } catch {}
+            }, tokenObj.token);
+            logDebug("Токен авторизации установлен в localStorage перед навигацией");
+          } catch {
+            /* page might be on different origin — ignore */
+          }
+        }
+
         // Navigate to Qwen Chat and wait for WAF SDK to fully load (networkidle0).
         // WAF SDK loads async from g.alicdn.com/aes/... — domcontentloaded is not enough.
         try {
@@ -1125,9 +1164,29 @@ export async function sendMessage(
           /* ignore if already navigated */
         }
 
+        // After navigation, sync the correct auth token into localStorage again.
+        // The page is now on chat.qwen.ai origin, so localStorage is accessible.
+        if (tokenObj?.token) {
+          try {
+            await browserContext.evaluate((t) => {
+              try {
+                localStorage.setItem("token", t);
+              } catch {}
+            }, tokenObj.token);
+          } catch {
+            /* ignore */
+          }
+        }
+
         const path2Start = Date.now();
         logInfo(`[Path2] Запуск fetch fallback к ${apiUrl.substring(0, 80)}...`);
-        response = await executeApiRequest(browserContext, apiUrl, payload, onChunk);
+        response = await executeApiRequest(
+          browserContext,
+          apiUrl,
+          payload,
+          onChunk,
+          tokenObj?.token || null
+        );
         const path2Elapsed = ((Date.now() - path2Start) / 1000).toFixed(1);
 
         // Path 2 succeeded — WAF is no longer blocking (browser context bypassed it)
@@ -1212,6 +1271,13 @@ export async function sendMessage(
       response.data.chatId = chatId;
       response.data.parentId = response.data.response_id;
       response.data.id = response.data.id || "chatcmpl-" + Date.now();
+
+      // Signal to persistSessionState that sendMessage created a new chat.
+      // Without this, the model default chat is never saved, causing every
+      // request to create a fresh Qwen chat — losing conversation context.
+      if (didCreateChatInternally()) {
+        response.data.newChatId = chatId;
+      }
 
       // Fallback: если поток чанков не был отдан, отправляем контент единым куском.
       if (typeof onChunk === "function" && response.data.choices?.[0]?.message?.content) {

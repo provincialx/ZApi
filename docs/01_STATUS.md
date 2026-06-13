@@ -1,6 +1,6 @@
-# ZApi — Status (2026-06-12)
+# ZApi — Status (2026-06-13)
 
-## Health: GREEN — DeepSeek direct API mode (2026-06-12)
+## Health: GREEN — DeepSeek direct API mode (2026-06-13)
 
 DeepSeek: полностью убран Puppeteer из API вызовов. Теперь используются прямые `fetch()`
 из Node.js с сохранёнными credentials (cookie + Bearer token + WASM solver).
@@ -24,6 +24,7 @@ Project refactored into **process-level isolation**: `index.js` dispatcher forks
 | CAPTCHA resolver (Qwen)           | Working   | S52: centralized `resolveCaptchaAndRetry()`, JWT inject, `SIMULATE_CAPTCHA` test mode. DeepSeek: Cloudflare Turnstile — bypassed via cookie extraction on initial browser auth.                                                                             |
 | Unit tests                        | Passing   | 46/46 (`npm test`) — Qwen unit suite unchanged. DeepSeek: no dedicated tests yet (D12).                                                                                                                                                                     |
 | ESLint                            | Clean     | 0 errors, ~37 warnings (known unused imports — tech-debt)                                                                                                                                                                                                   |
+| Logging isolation                 | Working   | Per-service log directories: `logs/qwen/`, `logs/deepseek/`. Controlled via `LOGS_DIR` env var set by dispatcher on fork.                                                                                                                                    |
 | Prettier                          | Formatted | All files clean                                                                                                                                                                                                                                             |
 | Aliyun WAF bypass (Qwen)          | Reworked  | S59→S62: убран `Authorization: Bearer` (фронтенд Qwen его не шлёт). Path 2 переписан: XHR → `fetch()` в main world (через WAF SDK страницы). Path 1 (Node.js) — только для `chats/new`. `networkidle0` + 2s пауза для WAF SDK.                     |
 | Cookie auth extraction (DeepSeek)     | Working   | Puppeteer one-time visible launch → user login → deepseek_accounts.json saved with Qwen-style format (cookies + authData with token/wasmUrl/hif_dliq/hif_leim). Deep recursive search extracts nested keys from localStorage/sessionStorage JSON objects.                                                                                   |
@@ -47,7 +48,7 @@ Project refactored into **process-level isolation**: `index.js` dispatcher forks
 
 | File              | Purpose                                                                | Shared by                                                                                                                 |
 | ----------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `config.js`       | PORT, HOST, LOG_LEVEL, LOG_MAX_SIZE, LOGS_DIR                          | All services import here for base server settings. Per-service config overrides service-specific values (URLs, timeouts). |
+| `config.js`       | PORT, HOST, LOG_LEVEL, LOG_MAX_SIZE, LOGS_DIR (from env)               | All services import here for base server settings. Per-service config overrides service-specific values (URLs, timeouts). Dispatcher sets LOGS_DIR per service on fork. |
 | `logger/index.js` | Winston + Morgan structured logging (`logInfo`, `logWarn`, `logError`) | All services use relative path imports (`../../../shared/logger/...`).                                                    |
 | `utils/prompt.js` | CLI readline prompt helper for interactive menus                       | Qwen account menu, DeepSeek auth menu, main dispatcher.                                                                   |
 

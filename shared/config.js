@@ -10,5 +10,7 @@ export const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
 export const LOG_MAX_SIZE = Number(process.env.LOG_MAX_SIZE ?? 5 * 1024 * 1024); // ~5MB
 export const LOG_MAX_FILES = Number(process.env.LOG_MAX_FILES ?? 5);
 
-// Logs directory — relative to project root (resolved at runtime)
-export const LOGS_DIR = "zapi/logs";
+// Logs directory — relative to project root (resolved at runtime).
+// Set via env LOGS_DIR, e.g. "logs/qwen" or "logs/deepseek" for per-service isolation.
+// The dispatcher (index.js) passes the appropriate subdirectory when forking a service.
+export const LOGS_DIR = process.env.LOGS_DIR || "logs";

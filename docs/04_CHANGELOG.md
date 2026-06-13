@@ -1,5 +1,15 @@
 # 04 — Changelog
 
+## Per-service log isolation (2026-06-13)
+
+Problem: Logs of all services were written to shared zapi/logs/.
+Now each service has its own log directory.
+
+Changes:
+- shared/config.js: LOGS_DIR now from env, default "logs"
+- index.js: passes LOGS_DIR=logs/qwen or logs/deepseek on fork
+- Logs: logs/qwen/*.log, logs/deepseek/*.log
+
 ## Recent stabilization (Sessions 34–62, June 7–11)
 
 | S     | Title                                                                     | Fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Files changed                                                                            |

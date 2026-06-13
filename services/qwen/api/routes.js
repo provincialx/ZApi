@@ -594,9 +594,14 @@ router.post("/chat/completions", async (req, res) => {
             // was purely tool-call junk — don't leak ]} to Zed. Skip sending chunk in that case.
             const stripped =
               parts.visible ||
-              String(content)
-                .replace(/{(?:"tool_calls|"tool_call)[^}]*}/g, "")
-                .trim(); // Strip JSON artifacts
+              (() => {
+                // Fallback: use parseToolCallParts to properly strip nested JSON.
+                // Simple regex /{(?:"tool_calls|"tool_call)[^}]*}/g breaks on nested
+                // objects like {"tool_calls":[{"name":"x","arguments":{"nested":{}}}]}
+                // because [^}]* matches only up to the FIRST }, leaving garbage in output.
+                const fallbackParts = parseToolCallParts(String(content));
+                return fallbackParts.visible || "";
+              })();
 
             if (stripped) {
               content = stripped.replace(/\s*[}\]]+$/, "").trim(); // Layer 2: kill trailing ]}
@@ -731,9 +736,13 @@ router.post("/chat/completions", async (req, res) => {
       if (parts && typeof parts === "object") {
         const stripped =
           parts.visible ||
-          String(responseContent)
-            .replace(/{(?:"tool_calls|"tool_call)[^}]*}/g, "")
-            .trim();
+          (() => {
+            // parseToolCallParts properly handles nested JSON artifacts.
+            // The old regex /{(?:"tool_calls|"tool_call)[^}]*}/g breaks on
+            // nested objects like {"tool_calls":[{"arguments":{"key":{}}}]}
+            const fallbackParts = parseToolCallParts(String(responseContent));
+            return fallbackParts.visible || "";
+          })();
 
         responseContent = stripped ? stripped.replace(/\s*[}\]]+$/, "").trim() : responseContent;
       }
