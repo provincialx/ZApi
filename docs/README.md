@@ -1,18 +1,20 @@
 # ZApi — Documentation Index
 
-| File                                           | Content                                                                                                                                                                                                                              | Last updated         |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- |
-| [01_STATUS.md](./01_STATUS.md)                 | Health table, quick start commands, critical architecture changes summary (WAF bypass, timeouts, account binding)                                                                                                                    | 2026-06-11           |
-| [02_ARCHITECTURE.md](./02_ARCHITECTURE.md)     | System overview + mermaid sequence diagrams for normal flow and agent-loop with "in progress" race handling. Account-to-chat ownership binding, timeout architecture (3 layers), CAPTCHA/WAF resolver flow, account management flows | 2026-06-11 (S55-S56) |
-| [03_CODE_MAP.md](./03_CODE_MAP.md)             | Module layout, key interfaces, dependency graph, LOC sizes, config constants, evaluate helpers table, account storage disk layout                                                                                                    | 2026-06-11 (S55-S56) |
-| [04_CHANGELOG.md](./04_CHANGELOG.md)           | Session history grouped by category: recent stabilization, tool calling, agent-loop stability, refactoring, critical bugs, infrastructure                                                                                            | Sessions 1–56        |
-| [05_OPEN_QUESTIONS.md](./05_OPEN_QUESTIONS.md) | Active tech-debt items (D1-D10), resolved issues archive, behavioral quirks, design constraints (WAF/browser-fetch mandate, page pool locks), API compatibility notes for external clients + Agent skill rules (S50)                 | 2026-06-11 (S55-S56) |
+| File                                           | Content                                                                                                                                                    | Last updated   |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| [01_STATUS.md](./01_STATUS.md)                 | Health table, provider comparison, quick start, critical architecture changes summary                                                                      | 2026-06-14     |
+| [02_ARCHITECTURE.md](./02_ARCHITECTURE.md)     | System overview, mermaid sequence diagrams (normal + tool-calling flows), two-path WAF strategy, timeout layers, error retry, account management           | 2026-06-14     |
+| [03_CODE_MAP.md](./03_CODE_MAP.md)             | Module layout with descriptions, key interfaces table, config constants table, evaluate helpers table, dependencies table                                  | 2026-06-14     |
+| [04_CHANGELOG.md](./04_CHANGELOG.md)           | Session history: stabilization, tool calling, WAF bypass, DeepSeek PoW, docs audit                                                                         | Sessions 1–67  |
+| [05_OPEN_QUESTIONS.md](./05_OPEN_QUESTIONS.md) | Active tech-debt items (D1-D11), resolved issues archive, behavioral quirks, API compatibility notes                                                       | 2026-06-14     |
 
-> Source material: `../.agent-brief.md` — raw session log with inline debugging traces and commit references. This structured docs extracted from **50+ development sessions** across June 7–11, 2026.
+> Source material: `../.agent-brief.md` — raw session log. Structured docs extracted from **67+ development sessions** across June 7–14, 2026.
 
-## Key architecture changes since S48
+## Key architecture changes
 
-- **S53**: Aliyun WAF detection (both Qwen CAPTCHA + Cloud WAF share resolver)
-- **S54**: CDP timeout protection — all `page.evaluate()` wrapped with `evaluateWithTimeout` / `evaluateInBrowser`
-- **S55**: Full browser-evaluate migration, account binding (`chatTokenOwner`), 5-min timeouts, account management overhaul
-- **S56**: Documentation sync across all files
+- **S53**: Aliyun WAF detection (CAPTCHA + Cloud WAF share resolver)
+- **S54**: CDP timeout protection — `evaluateWithTimeout` / `evaluateInBrowser`
+- **S55**: Browser-evaluate migration, account binding (`chatTokenOwner`), 5-min timeouts
+- **S61**: Multi-provider isolation via `child_process.fork()`, shared/ module pool
+- **S62**: WAF bypass: removed `Authorization: Bearer`, Path 2 rewritten via page fetch
+- **S67**: Docs audit: dead code removed, discrepancies fixed, architecture rewritten with mermaid
