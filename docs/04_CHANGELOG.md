@@ -1,5 +1,12 @@
 # 04 — Changelog
 
+## Tool prompt fix + file cache for agent-loop stability (2026-06-14)
+
+- **`toolUtils.js`** — Fixed `toolsToPrompt()`: rewrote from Russian to English, clarified JSON format with concrete example, removed negative phrasing. Language matches system message for better model compliance.
+- **`fileCache.js` (new)** — In-memory cache for `read_file`/`list_directory` tool results. Populated from incoming tool results via `populateCacheFromMessages()`. Prevents redundant file reads in agent loops.
+- **`routes.js`** — Added `populateCacheFromMessages()` call at start of request handler to build cache from tool results. Removed broken response-path interception (caused infinite loop). Anti-loop guard (`getRepeatedToolCalls`) now handles repeated calls via conversation history.
+- **`docs/03_CODE_MAP.md`** — Added fileCache module to layout and key interfaces table.
+
 ## Documentation audit + dead code cleanup (2026-06-14)
 
 - **`debug-trace.js` deleted** — broken import (`./logger/index.js` → doesn't exist), never imported anywhere. Dead code removed.

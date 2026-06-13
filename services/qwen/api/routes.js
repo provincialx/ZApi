@@ -54,6 +54,9 @@ import { withRequestTimeout } from "./timeoutWrapper.js";
 // ─── Response Builders (streaming, tool calls SSE) ─────────────────────────
 import { buildOpenAIToolResponse, writeToolCallsSse } from "./responseBuilders.js";
 
+// ─── File Cache (dedup read_file/list_directory in agent loops) ─────────────
+import { populateCacheFromMessages } from "./fileCache.js";
+
 const router = express.Router();
 
 // ─── Mount sub-routers (before auth) ──────────────────────────────────────
@@ -111,6 +114,9 @@ router.post("/chat/completions", async (req, res) => {
       logError("Запрос без сообщений");
       return res.status(400).json({ error: "Сообщения не указаны" });
     }
+
+    // Populate file cache from incoming tool results (agent-loop dedup)
+    populateCacheFromMessages(messages);
 
     const isMeta = isOpenWebUiMetaRequest(messages);
 
@@ -443,6 +449,10 @@ router.post("/chat/completions", async (req, res) => {
             `[TOOL_PARSE] result → visible=${parts.visible ? "yes" : "no"}, calls=${rawCalls.length}, normalized=${toolCalls?.length || 0}`
           );
 
+          // File cache: skip response-path interception (breaks agent-loop).
+          // Cache is populated via populateCacheFromMessages() from incoming tool results.
+          // Anti-loop guard below catches repeated calls using conversation history.
+
           // Anti-loop: detect repeated/blocked tool calls (from Python fork)
           if (toolCalls && toolCalls.length > 0) {
             const repeated = getRepeatedToolCalls(toolCalls, messages);
@@ -701,6 +711,10 @@ router.post("/chat/completions", async (req, res) => {
       }
       const rawCalls = parts ? parts.calls || [] : [];
       const toolCalls = normalizeToolCalls(rawCalls);
+
+      // File cache: skip response-path interception (breaks agent-loop).
+      // Cache is populated via populateCacheFromMessages() from incoming tool results.
+      // Anti-loop guard handles repeats via conversation history.
 
       // Auto-reset: increment on tool_calls, defer until loop ends.
       // Same logic as streaming path — mid-loop invalidation breaks Qwen context.

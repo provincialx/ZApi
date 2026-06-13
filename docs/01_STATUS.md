@@ -1,6 +1,6 @@
 # ZApi — Status (2026-06-14)
 
-## Health: GREEN — Documentation audit + dead code cleanup
+## Health: GREEN — Tool prompt fix + file cache for agent-loop stability
 
 ### Architecture S61+: Multi-Provider Separation
 

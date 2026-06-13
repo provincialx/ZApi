@@ -42,8 +42,10 @@ services/                                   # Provider-isolated modules — each
 │   │   │                                  #   extractAuthToken, getAvailableModelsFromFile
 │   │   ├── toolUtils.js                    # Tool prompt injection & JSON extraction (~500 LOC).
 │   │   │                                  #   applyToolPrompt, parseToolCallParts (brace repair),
-│   │   │                                  #   normalizeToolCalls, toolsToPrompt/toolsToLightPrompt.
+│   │   │                                  #   normalizeToolCalls, toolsToPrompt (English)/toolsToLightPrompt.
 │   │   │                                  #   Anti-loop: getRepeatedToolCalls.
+│   │   ├── fileCache.js                   # In-memory cache for read_file/list_directory (~220 LOC).
+│   │   │                                  #   populateCacheFromMessages, getCachedFile/setCachedFile.
 │   │   ├── modelMapping.js                 # Qwen model name aliases (only Qwen variants, no GPT/Claude).
 │   │   │                                  #   28 canonical models + alias groups. getMappedModel fallback
 │   │   │                                  #   to DEFAULT_MODEL on no match.
@@ -124,6 +126,8 @@ services/                                   # Provider-isolated modules — each
 | `parseToolCallParts()` | `toolUtils.js` | Extract tool calls from Qwen JSON response |
 | `applyToolPrompt()` | `toolUtils.js` | Inject tool definitions into system message |
 | `normalizeToolCalls()` | `toolUtils.js` | Convert raw calls → OpenAI format |
+| `populateCacheFromMessages()` | `fileCache.js` | Scan messages for tool results to populate cache |
+| `getCachedFile()` / `setCachedFile()` | `fileCache.js` | File read cache for agent-loop dedup |
 | `buildStatelessTranscript()` | `openaiUtils.js` | Fold history → single user message |
 | `hasOpenAIToolState()` | `openaiUtils.js` | Detect tool calls in message history |
 | `handleApiError()` | `qwenApi.js` | Classify + route errors (401/429/503/generic) |

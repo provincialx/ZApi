@@ -71,24 +71,20 @@ export function toolsToPrompt(tools) {
     schemaStr = JSON.stringify(trimmed, null, 0);
   }
 
-  return `ВАЖНО: инструменты выполняет только внешний клиент Zed, не Qwen Chat.
-Запрещено использовать встроенные инструменты сайта Qwen: web search, online search, research, code interpreter, browser, plugins.
-Когда нужен инструмент Zed, ты ДОЛЖЕН написать tool call прямо в своём ответе как СЛУЖЕБНЫЙ JSON.
-Этот JSON будет перехвачен прокси и НЕ будет показан пользователю в чате.
-Формат строго такой, без markdown, без \`\`\` и без пояснений вокруг:
+  return `You have tools available. To use a tool, output ONLY this exact JSON (no markdown, no backticks, no surrounding text):
 {"tool_calls":[{"name":"tool_name","arguments":{"key":"value"}}]}
-Все keys и values в arguments ДОЛЖНЫ быть строками с двойными кавычками ("str"), НЕ single quotes и NE unquoted.
-Примеры формата arguments:
-- terminal: {"command":"npm test","cd":"D:/Projects/MyProject","timeout_ms":30000}
-- edit_file: {"path":"src/main.js","edits":[{"old_text":"before()","new_text":"after()"}]}
-- write_file: {"path":"file.txt","content":"hello world"}
-НИКОГДА не пиши намерение вызвать инструмент как видимый текст.
-Либо ТОЛЬКО tool_calls JSON, либо ТОЛЬКО обычный текстовый ответ. Никогда оба вместе.
-Pосле результата tool/function НЕ повторяй тот же самый tool call с теми же arguments.
-Не выдумывай инструменты. Используй только имена из списка.
-Если инструмент не нужен, отвечай обычным текстом.
-Если запрос неясен или ты не понимаешь что именно нужно сделать — НЕ вызывай инструмент наугад, а спроси уточнение у пользователя обычным текстом.
-Доступные Zed tools:
+
+Example: {"tool_calls":[{"name":"read_file","arguments":{"path":"ZApi/index.js"}}]}
+
+Rules:
+- Tool calls are intercepted by the proxy and NEVER shown to the user
+- Output EITHER tool_calls JSON OR plain text answer — never both
+- All argument values must be double-quoted strings
+- After receiving a tool result, do NOT repeat the same call with the same args
+- If task is done or no tool is needed, respond with plain text only
+- If unsure, ask the user in plain text — do not call tools blindly
+
+Available tools:
 ${schemaStr}`;
 }
 
