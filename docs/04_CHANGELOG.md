@@ -1,5 +1,15 @@
 # 04 — Changelog
 
+## Cross-account auth + JSON artifact stripping fixes (2026-06-13)
+
+| Area | Change | Details |
+|------|--------|--------|
+| `qwenApi.js` executeApiRequest | `Authorization: Bearer` header добавлен | Path 2 (browser fetch) теперь шлёт Bearer токен, чтобы запрос авторизовался как владелец чата — предотвращает cross-account "chat not exist" когда cookies браузера от другого аккаунта. Токен передаётся через новый параметр `authToken` и инжектится в main-world fetch. |
+| `qwenApi.js` sendMessage | localStorage token sync до/после навигации | Перед `goto()` и после — синхронизация JWT в localStorage браузера, чтобы страница загрузилась с правильным аккаунтом. |
+| `qwenApi.js` sendMessage | `didCreateChatInternally()` closure | Новая функция возвращает `true` если sendMessage сам создал чат (не было передан `chatId`). Флаг `response.data.newChatId` сигнализирует `persistSessionState` о необходимости сохранить model default chat. Без этого каждый запрос создавал новый чат. |
+| `routes.js` | JSON artifact stripping: regex → `parseToolCallParts` | Старый regex `/{(?:"tool_calls|"tool_call)[^}]*}/g` ломался на вложенных объектах (`[^}]*` матчит только до первого `}`). Заменён на `parseToolCallParts()` в обоих путях (streaming + non-streaming). |
+| `toolUtils.js` | Clarification instruction | В `toolsToPrompt` (RU) и `toolsToLightPrompt` (EN) добавлено: если запрос неясен — спросить у пользователя, а не вызывать инструмент наугад. |
+
 ## Per-service log isolation (2026-06-13)
 
 Problem: Logs of all services were written to shared zapi/logs/.

@@ -87,6 +87,7 @@ export function toolsToPrompt(tools) {
 Pосле результата tool/function НЕ повторяй тот же самый tool call с теми же arguments.
 Не выдумывай инструменты. Используй только имена из списка.
 Если инструмент не нужен, отвечай обычным текстом.
+Если запрос неясен или ты не понимаешь что именно нужно сделать — НЕ вызывай инструмент наугад, а спроси уточнение у пользователя обычным текстом.
 Доступные Zed tools:
 ${schemaStr}`;
 }
@@ -460,6 +461,8 @@ You are in AGENT LOOP with tools. Your task is to EXECUTE actions, not explain t
 - Task COMPLETE → Write plain text answer with findings WITHOUT any JSON
 - NEVER output your intention to call a tool as visible text
 - Either output ONLY the tool_calls JSON OR ONLY plain text answer. Never both.
+
+If the request is unclear or you don't understand what exactly needs to be done — DO NOT call a tool blindly, ask the user for clarification in plain text instead.
 
 When you NEED to call another tool, output ONLY this minified JSON (no surrounding text, no markdown):
 {"tool_calls":[{"name":"","arguments":{}}]}

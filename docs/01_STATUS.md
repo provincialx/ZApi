@@ -1,13 +1,23 @@
 # ZApi — Status (2026-06-13)
 
-## Health: GREEN — DeepSeek direct API mode (2026-06-13)
+## Health: GREEN — Qwen cross-account auth fixes + tool call cleanup
 
 DeepSeek: полностью убран Puppeteer из API вызовов. Теперь используются прямые `fetch()`
 из Node.js с сохранёнными credentials (cookie + Bearer token + WASM solver).
 Браузер используется только для одноразовой авторизации (auth.js). PoW решается через
 WASM модуль (sha3_wasm_bg.wasm) с хардкодным fallback URL. Больше нет зависаний
 из-за WAF/CAPTCHA — API запросы не проходят через браузер.
-Qwen: без изменений.
+
+Qwen: исправлены две ключевые проблемы:
+- **Cross-account "chat not exist"**: Path 2 (browser fetch) теперь шлёт `Authorization: Bearer`
+  через параметр `authToken` + localStorage sync до/после навигации — запрос авторизуется
+  как владелец чата, а не как владелец cookies браузера.
+- **Каждый запрос создавал новый чат**: новая `didCreateChatInternally()` closure и флаг
+  `newChatId` сигнализируют `persistSessionState` о необходимости сохранить model default chat.
+- **JSON artifact stripping**: сломанный regex заменён на `parseToolCallParts()` — вложенные
+  JSON объекты (`{"tool_calls":[{"arguments":{"nested":{}}}]}`) больше не оставляют мусор в тексте.
+- **Clarification instruction**: модели теперь просят уточнение у пользователя, а не вызывают
+  инструмент наугад при неясном запросе.
 
 ### Architecture S61+: Multi-Provider Separation
 
@@ -16,9 +26,9 @@ Project refactored into **process-level isolation**: `index.js` dispatcher forks
 | Area                              | Status    | Notes                                                                                                                                                                                                                                                       |
 | --------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Multi-provider architecture       | Working   | S61: `index.js` dispatcher → forks Qwen and DeepSeek as isolated child processes via `child_process.fork()` with signal forwarding                                                                                                                          |
-| Tool calling (SSE + streaming)    | Working   | Qwen only. Anti-loop guards, chunk splitting, parse reliability. DeepSeek: native OpenAI tool_calls supported at API level — requires agent-loop routing in routes.js layer.                                                                                |
+| Tool calling (SSE + streaming)    | Working   | Qwen only. Anti-loop guards, chunk splitting, `parseToolCallParts()` replaces broken regex for JSON artifact stripping (nested objects like `{"tool_calls":[{"arguments":{}}]}` no longer produce trailing garbage). Clarification instruction added to both prompt variants — model asks instead of blind tool calls. DeepSeek: native OpenAI tool_calls supported at API level. |
 | Agent-loop stability              | Working   | Qwen: Deferred auto-reset, cooldown, same-chat retry on "in progress". DeepSeek: not implemented (single-message model).                                                                                                                                    |
-| Chat management                   | Working   | S46: resolveQwenChatId creates chat when no default exists. invalidateQwenChatId cleans ALL maps on "not exist" error. Early mapChatId (S57) saves mapping before SSE timeout loses it. DeepSeek: simple in-memory Map<conversation_id → deepseek_chat_id>. |
+| Chat management                   | Working   | `didCreateChatInternally()` closure + `newChatId` flag fixes every-request-creates-new-chat bug — persistSessionState now saves model default chat when sendMessage creates one. Cross-account auth: `Authorization: Bearer` header in Path 2 + localStorage token sync prevents "chat not exist" on wrong account. DeepSeek: simple in-memory Map. |
 | Page pool memory (Qwen)           | Mitigated | Hard limit 5 pages, idle TTL 5min, periodic GC every 60s, Memory Guard RSS restart                                                                                                                                                                          |
 | Timeout enforcement               | Active    | `REQUEST_TIMEOUT_MINUTES` (5m) wrapper + protocolTimeout synced at ~180s+ CDP limit. SSE reader abort 3min (S57). Path 2 fetch timeout reduced to 20s (S66) — WAF дропает за секунды. DeepSeek: configurable per-service timeout via `DEEPSEEK_REQUEST_TIMEOUT` env var (default 5 min). |
 | CAPTCHA resolver (Qwen)           | Working   | S52: centralized `resolveCaptchaAndRetry()`, JWT inject, `SIMULATE_CAPTCHA` test mode. DeepSeek: Cloudflare Turnstile — bypassed via cookie extraction on initial browser auth.                                                                             |
