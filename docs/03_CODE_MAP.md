@@ -3,61 +3,174 @@
 ## Module layout
 
 ```
-index.js                                    # Dispatcher: choose provider → fork child process via child_process.fork()
-│   ├── SERVICES array: [{ id, label, entry }] → fork(entry)
-│   └── Signal forwarding: SIGINT/SIGTERM/SIGHUP → child.kill(sig)
+index.js                                    # Dispatcher: choose provider → fork child process
+│   └── SERVICES array → fork(entry), signal forwarding: SIGINT/SIGTERM/SIGHUP → child.kill(sig)
+
+shared/                                     # Common utilities (relative imports from any depth)
+├── config.js                               # Base: PORT, HOST, LOG_LEVEL, LOG_MAX_SIZE, LOGS_DIR
+├── logger/index.js                         # Winston + Morgan: logInfo/logWarn/logError/logDebug/logRaw/logHttp
+└── utils/prompt.js                         # CLI readline prompt helper
+
+services/                                   # Provider-isolated modules — each runs as separate process
+
+├── qwen/                                   # Qwen Chat proxy (Aliyun WAF bypass, multi-account)
+│   ├── index.js                            # Entry: Express app + account menu. startQwenProxy/showAccountMenu
+│   ├── config.js                           # Qwen-specific: CHAT_API_URL, PAGE_TIMEOUT, PAGE_POOL_SIZE,
+│   │                                      #   MAX_ACTIVE_PAGES(5), BROWSER_RESTART_RSS_MB(512),
+│   │                                      #   MEMORY_CHECK_INTERVAL(20), REQUEST_TIMEOUT_MINUTES(5)
+│   ├── data/
+│   │   ├── Authorization.txt              # API keys (Bearer token whitelist)
+│   │   └── AvailableModels.txt            # Model names list (28 models)
+│   │
+│   ├── api/                                # OpenAI-compatible endpoints + Qwen Web interaction
+│   │   ├── routes.js                       # Main handler (~1030 LOC). Chat ID resolution, streaming/
+│   │   │                                  #   non-streaming paths, agent-loop logic, tool call folding.
+│   │   │                                  #   Imports from shared/ via ../../../shared/logger/...
+│   │   ├── qwenApi.js                      # Qwen API interaction (~1284 LOC). Two-path strategy,
+│   │   │                                  #   retry policy, CAPTCHA resolution, sendMessage/createChatV2/
+│   │   │                                  #   testToken. Path 2: browser evaluate with authToken param
+│   │   ├── chatSession.js                  # Chat ID map/model defaults (~630 LOC). resolveQwenChatId
+│   │   │                                  #   (3-level fallback), session persistence, force-fold triggers,
+│   │   │                                  #   chatTokenOwner binding. GC: stale sessions >24h, caps on maps
+│   │   ├── openaiUtils.js                  # Message parsing (~400 LOC). parseOpenAIMessages,
+│   │   │                                  #   hasOpenAIToolState, buildStatelessTranscript, folding helpers.
+│   │   │                                  #   Pure functions — no side effects.
+│   │   ├── responseBuilders.js             # SSE chunk construction (~260 LOC). writeToolCallsSse (incremental
+│   │   │                                  #   deltas, 500-char arg chunks), handleStreamingResponse.
+│   │   ├── chat.js                         # Token state + model/key loaders (~180 LOC). Re-exports
+│   │   │                                  #   evaluateWithTimeout/evaluateInBrowser from pagePool.js.
+│   │   │                                  #   extractAuthToken, getAvailableModelsFromFile
+│   │   ├── toolUtils.js                    # Tool prompt injection & JSON extraction (~500 LOC).
+│   │   │                                  #   applyToolPrompt, parseToolCallParts (brace repair),
+│   │   │                                  #   normalizeToolCalls, toolsToPrompt/toolsToLightPrompt.
+│   │   │                                  #   Anti-loop: getRepeatedToolCalls.
+│   │   ├── modelMapping.js                 # Qwen model name aliases (only Qwen variants, no GPT/Claude).
+│   │   │                                  #   28 canonical models + alias groups. getMappedModel fallback
+│   │   │                                  #   to DEFAULT_MODEL on no match.
+│   │   ├── tokenManager.js                 # Token rotation, account status (OK/RATELIMIT/INVALID).
+│   │   │                                  #   loadTokens/saveTokens → session/tokens.json.
+│   │   ├── adminRoutes.js                  # Admin endpoints: /health, /models (OpenAI format), /status,
+│   │   │                                  #   /chats (POST create). Uses FORGETMEAI_WATERMARK branding.
+│   │   ├── timeoutWrapper.js               # withRequestTimeout(promise, label) — Promise.race vs setTimeout.
+│   │   │                                  #   Uses REQUEST_TIMEOUT_MINUTES from config.
+│   │   ├── projectContext.js               # Anti-hallucination: filesystem scan → compact tree inject.
+│   │   │                                  #   getProjectStructureAsync() async scan; buildProjectContext()
+│   │   │                                  #   sync cache. Excludes: node_modules, .git, session, logs, uploads.
+│   │   ├── chatHistory.js                  # Local chat history persistence (JSON files per chatId).
+│   │   │                                  #   Path: SESSION_DIR/history/{chatId}.json. loadHistory, saveHistory,
+│   │   │                                  #   createChat, deleteChat. MAX_HISTORY_LENGTH=100.
+│   │   ├── fileRoutes.js                   # File upload + chat history API routes. POST /files/getstsToken,
+│   │   │                                  #   POST /files/upload (multer), GET/POST /chats/:chatId/history.
+│   │   └── fileUpload.js                   # Alibaba Cloud OSS upload via STS credentials. uploadFileToQwen:
+│   │                                      #   getStsToken (browser evaluate fetch) → uploadFile (OSS SDK in
+│   │                                      #   browser). MAX_FILE_SIZE=10MB.
+│   │
+│   ├── browser/                            # Puppeteer + Chromium management
+│   │   ├── browser.js                      # Puppeteer launch (~370 LOC). initBrowser(visible?),
+│   │   │                                  #   shutdownBrowser, restartBrowserInHeadlessMode.
+│   │   │                                  #   StealthPlugin, --disable-web-security, protocolTimeout sync.
+│   │   ├── pagePool.js                     # Page pool (~374 LOC). getPage/releasePage with health check.
+│   │   │                                  #   Max pool=3, max active=5. GC: idle TTL 5min, interval 60s.
+│   │   │                                  #   Memory Guard RSS restart. evaluateWithTimeout (5s) /
+│   │   │                                  #   evaluateInBrowser (long-lived, synced to REQUEST_TIMEOUT).
+│   │   ├── auth.js                         # Auth verification + CAPTCHA resolution. checkAuthentication,
+│   │   │                                  #   startManualAuthentication, checkVerification. Uses console.log
+│   │   │                                  #   for interactive prompts.
+│   │   └── session.js                      # Cookie/token persistence. saveSession/loadSession per-account:
+│   │                                      #   session/accounts/{id}/cookies.json. saveAuthToken/loadAuthToken
+│   │                                      #   for global token.txt.
+│   │
+│   └── utils/
+│       ├── branding.js                     # CONTACT_INFO, FORGETMEAI_WATERMARK
+│       └── accountSetup.js                 # Account CLI: addAccountInteractive, reloginAccountInteractive,
+│                                           #   removeAccountInteractive. Uses shared/utils/prompt.js.
 │
-shared/                                     # Common utilities reused across all providers (absolute-relative imports)
-├── config.js                               # Base settings: PORT, HOST, LOG_LEVEL, LOG_MAX_SIZE, LOGS_DIR
-├── logger/index.js                         # Winston + Morgan structured logging: logInfo/logWarn/logError/logDebug/logRaw/logHttp
-└── utils/prompt.js                         # CLI readline prompt helper (interactive menus in child processes)
-│
-services/                                   # Provider-isolated proxy modules — each runs as separate process
-│
-│   qwen/                                   # Qwen Chat proxy (Aliyun WAF bypass, browser-evaluate path, multi-account)
-│   ├── index.js                            # Entry point: Express app + account menu. Exports startQwenProxy/showAccountMenu. Self-detects main module via import.meta.url check → auto-start if run directly. Forked from dispatcher with stdio: "inherit".
-│   ├── config.js                           # Qwen-specific constants: CHAT_API_URL, CREATE_CHAT_URL, PAGE_TIMEOUT, RETRY_DELAY, ALLOW_UNSCOPED_SESSION_CHAT_RESTORE, BROWSER_RESTART_RSS_MB (512), MEMORY_CHECK_INTERVAL (20)
-│   │   └── Inherits from shared/config.js: PORT, HOST (overridable via DEEPSEEK_PORT or env.PORT per process). Uses process.env.DEEPSEEK_PORT fallback chain.
-│   ├── data/                               # Runtime files (relative to project root via __dirname resolution in chat.js): Authorization.txt (API keys), AvailableModels.txt (model names)
-│   │
-│   ├── api/                                # API layer — OpenAI-compatible endpoints + Qwen Web interaction
-│   │   ├── routes.js                       # Main handler. ~1030 LOC: chatId resolution, streaming/non-streaming paths, agent-loop logic (S22), S42 retry/backoff, tool call folding trigger. JSON artifact stripping: broken regex `/{(?:"tool_calls|"tool_call)[^}]*}/g` replaced with `parseToolCallParts()` in both streaming and non-streaming paths — nested JSON objects no longer produce trailing garbage. Imports from shared/logger/... via ../../../../shared/. Re-exports sendMessage/createChatV2/testToken from qwenApi.js for backward compatibility with external scripts.
-│   │   ├── chatSession.js                  # Chat ID map/model defaults, session persistence, force-fold triggers, ownership tracking. ~630 LOC. Key exports: resolveQwenChatId (layered fallback: chatIdMap → modelDefaultChats → create new), invalidateQwenChatId (clean ALL maps on "not exist"), setChatTokenOwner/getChatTokenOwner (bind Qwen chats to creating account for multi-account safety). _runGC() cleanup stale sessions (>24h), cap maps (chatIdMap 500, idempotencyCache 1000, chatTokenOwner 500).
-│   │   ├── openaiUtils.js                  # Message parsing/normalization, tool state detection (hasOpenAIToolState returns true if assistant.tool_calls present), folding helpers buildCombinedTools/toolsToLightPrompt (S23: full vs compact schema injection). ~400 LOC. Pure functions — no side effects except debug logging.
-│   │   ├── responseBuilders.js             # SSE chunk construction: tool_call delivery via writeToolCallsSse (~500 chars, incremental deltas), streaming fallback to JSON when stream callback is null (S29). ~260 LOC. Handles both captureToolCalls mode (blocks normal callback, collects entire response for parseToolCallParts roundtrip) and direct streaming modes via same buildOpenAIToolResponse interface that writes deltas.
-│   │   ├── qwenApi.js                      # Qwen API interaction: two-path strategy (S59), retry policy, error handling, CAPTCHA resolution. ~1284 LOC total. Key exports: sendMessage(messages, model, callback?, captureToolCalls?) → returns {success, data, error...}. has `didCreateChatInternally()` closure + `newChatId` flag to signal caller when a new chat was created internally (fixes every-request-creates-new-chat bug). localStorage token sync before/after browser navigation in Path 2 — ensures correct account session. createChatV2(model?, parentId?, tokenObj?). testToken(token). buildPayloadV2(constructor for /api/v2/chat/completions request with feature_config disabled at payload level (S18/S20)). parseNonSseCompletionBody(shared parser: detects ret[] errors, HTTP codes, captcha/overload signals in JSON bodies returned with 200 status — S43). parseNonSseInBrowser(inline inside evaluate callback: same logic self-contained for Chromium context — S58). executeApiRequestWithNodeStreaming(primary path: fast Node.js fetch with Origin/Referer/WAF-bypass headers + SSE reader + 15s empty-stream fast-fail (S59)). executeApiRequest(page, apiUrl, payload, onChunk?, authToken?) — Path 2 browser fetch now accepts `authToken` param, injects `Authorization: Bearer` into main-world fetch to prevent cross-account "chat not exist" errors. resolveCaptchaAndRetry() centralized CAPTCHA handler: JWT save/inject, visible browser cycle, retry (S52). resolveAuthToken(browserContext, preferredOwnerId) account binding + rotation logic. handleApiError(classify & route errors: 401→rotate token/retry, 429→mark rate-limited/next token, 503 overload/CAPTCHA → trigger resolveCaptchaAndRetry or backoff retry (S48/S52), generic → return error with details).
-│   │   ├── chat.js                         # Token state + model/key loaders. ~180 LOC. Re-exports evaluateWithTimeout/evaluateInBrowser/EVALUATE_HEALTH_TIMEOUT from pagePool.js for backward compatibility with external scripts that import these helpers directly without knowing the actual module location. Grew thin after S14 split of response building logic to dedicated responseBuilders.js file.
-│   │   ├── toolUtils.js                    # Tool prompt injection & parseToolCallParts (JSON extraction). ~500 LOC total. Key exports: applyToolPrompt(system, tools) prepends tool instructions to system message with schema compaction and hard cap MAX_SCHEMA_LEN=6000 chars (S27). normalizeToolCalls(raw array → OpenAI format with id/type/function/arguments + repair truncated braces if missing closing bracket — S18/S38. getRepeatedToolCalls/getBlockedToolCalls anti-loop guards: repeated calls tracked via tool_call name + argument signature hash — if same call repeats > TOOL_CALL_RESET_THRESHOLD times without new content → force fold (S26). toolsToPrompt vs toolsToLightPrompt variants for full schema injection on first turn vs compact prompt in agent loop. Both prompt variants now include clarification instruction: if request is unclear, ask user for clarification instead of calling a tool blindly (RU in toolsToPrompt, EN in toolsToLightPrompt). _stripTrailingBracketGarbage trims trailing `[]{}\s]+` patterns at all parse exit points to eliminate `[}`/`]` garbage when Qwen aborts JSON generation mid-response — S38/S52.
-│   │   ├── fileRoutes.js                   # File upload STS token, chat history GET/POST endpoints (Alibaba Cloud OSS integration via evaluateInBrowser for browser context fetch). Routes mounted at /files/: getStsToken → GET handler in qwenApi.testToken() endpoint returns JSON with accessKeyId/accessKeySecret/securityToken/bucket/endpoint info. /chatHistory/:id/history → read/write conversation state as JSON files per chatId stored under session/chat_history/{id}.json — persistent across restarts via file system storage.
-│   │   ├── modelMapping.js                 # External → internal Qwen model name mapping table (e.g., gpt-4o → qwen-max-latest, claude-opus → qwen3-coder-plus). Loaded once at startup from AvailableModels.txt, cached in-memory as availableModels array. Used by routes.js for getMappedModel(modelName) fallback to DEFAULT_MODEL when no match found — prevents Qwen API errors on unknown model names from external clients (Zed Agent sends OpenAI-style model IDs like "gpt-4o").
-│   │   ├── tokenManager.js                 # Token rotation, account status tracking (OK/RATELIMIT/INVALID), invalidation via markInvalid/markValid APIs. Pointers used in sendMessage() resolveAuthToken(preferredOwnerId) → preferredOwner→token → round-robin across valid pool when no owner match exists for current chat. saveTokens/loadTokens to session/tokens.json with error handling via try/catch + logError on parse failure — prevents crash from corrupted JSON files if file is modified externally or mid-write during restart.
-│   │   ├── projectContext.js              # Anti-hallucination: filesystem scan → compact directory tree injected into system message prefix (up to 80 lines). buildProjectContext(rootPath) recursively walks directories, filters known patterns (.git/, node_modules/,.vscode/), returns text block with line count stats (dirs: N, files: M). Used by routes.js prepended before tool protocol instructions so model knows project layout when generating file operations via tool calls — prevents hallucinated paths like "src/components/Header.tsx" that don't exist.
-│   │   ├── chatHistory.js                 # Chat history persistence endpoints for /chats/:chatId/history GET/POST (JSON files per chatId stored under session/chat_history/{id}.json). loadHistory(chatId) → reads from disk if exists, returns empty messages array on first message saves state atomically after sendMessage() completes with new response appended to history. Error handling: fs.existsSync check before readFileSync — prevents EEXIST/ENOENT errors when accessing chat IDs that were never persisted yet (new conversation or forceNewChat flow).
-│   │   ├── fileUpload.js                  # Alibaba Cloud OSS upload handler via STS credentials. File multipart parsing using Multer middleware (MAX_FILE_SIZE=10MB limit enforced in config.js — rejects larger uploads at routes layer with 413 status). evaluateInBrowser(fetch) used for browser context request to Qwen API endpoints that require auth cookies — bypasses WAF detection of Node.js user-agent when sending file metadata/attachment refs. Returns upload result JSON with objectKey/ossUrl/bucket info passed back as message attachment in OpenAI content array format: { type: "image", image_url: ... }.
-│   │   ├── timeoutWrapper.js              # withRequestTimeout(Promise, ms) wrapper for REQUEST_TIMEOUT_MINUTES enforcement via Promise.race against setTimeout reject. Used by routes.js POST handler → wraps sendMessage() call — if Qwen SSE stream doesn't produce final [DONE] or error within configured time window (default 5 min, env var: REQUEST_TIMEOUT_MINUTES), returns partial content with "timed_out" finish_reason instead of hanging client connection indefinitely. Prevents OOM from abandoned CDP sessions during failed generations.
-│   │   ├── debug-trace.js                 # Experimental tracing/debug utilities for deep request flow analysis (unused in production, kept for future profiling). Logs detailed timestamps around chat ID resolution, token selection, SSE chunk arrival times — useful when diagnosing latency spikes or stream reader hangs caused by network/WAF issues during long agent loops.
-│   │
-│   ├── browser/                           # Puppeteer + Chromium management: stealth evasion, protocolTimeout setting (S41), dumpio:false suppresses crashpad binary dumps on stderr during headless shutdown on Windows — S52/S54)
-│   │   ├── browser.js                    # Puppeteer launch config. ~370 LOC. Key exports: initBrowser(visible?, skipManualRestart?) → visible=true for manual auth flow, skipManualRestart skips blocking "press Enter" wait after login (S52). shutdownBrowser() graceful close all pages + exit Chromium process. setAuthenticationStatus/getAuthenticationStatus track whether user completed manual login in headless mode — prevents duplicate browser windows on restart during CAPTCHA resolution cycle where session expired mid-stream due to Aliyun WAF timeout before completion. protocolTimeout calculated from REQUEST_TIMEOUT_MINUTES (~180 min default — prevents CDP disconnect during long SSE streams (S41/S53+). Uses waitUntil:"domcontentloaded" instead of networkidle2 in manual auth flow → eliminates 60s timeout on Qwen Studio analytics trackers that never fire "network idle" due to continuous beacon requests (S52. Uses --disable-web-security + --disable-features=IsolateOrigins,site-per-process for bypass CSP blocks on same-origin fetch from isolated evaluate context — required because Aliyun WAF returns HTML challenge page as HTTP 200 with aliyun_waf meta tags instead of standard error codes (S53. Uses StealthPlugin evasion to pass Cloudflare/FingerprintJS checks during initial login → cookies remain valid after headless switch prevents session invalidation when Puppeteer closes browser then restarts in background mode without GUI window — S41/S52).
-│   │   ├── pagePool.js                   # Page pool + evaluate helpers: health-check checkout/release, idle TTL GC (S31). ~374 LOC. Key exports: getPage() acquire from pool with evaluate timeout health check → if evaluateWithTimeout(page) fails after 5s EVALUATE_HEALTH_TIMEOUT → close dead page and createPage(new one) to maintain MAX_ACTIVE_PAGES limit of 5 concurrent checked-out pages at any given time (S31). releasePage(validate before return → if invalid/closed via page.close() suppress Target closed errors on safeClosePage(recursion fix: calls page.close directly, not itself recursively — S45. _runGC/_ensureGC lazy-started periodic GC at PAGE_GC_INTERVAL_MS(60s default): evict pages idle >PAGE_IDLE_TTL_MS (S31). Memory Guard RSS check every MEMORY_CHECK_INTERVAL getPage() calls → trigger restartBrowserIfLeaking when Node.js process exceeds BROWSER_RESTART_RSS_MB threshold (512 MB default) → graceful shutdown old Chromium + init new one with fresh cookies loaded from session/accounts/{id}/cookies.json files — prevents OOM kills during long agent loops where browser heap grows monotonically as DOM accumulates via repeated chat page navigations without GC opportunity between requests — S31/S45. evaluateWithTimeout(page, fn) simple wrapper: Promise.race against 5s timeout reject for health checks only (S54). evaluateInBrowser(page, fn, args) long-lived wrapper: passes args as evaluate parameters → wraps `page.evaluate(fn, ...args)` → supports ≥180s default timeout synced with protocolTimeout so 5-minute SSE streams inside Chromium tabs don't break CDP connection before generation completes (S41/S53+/S59). Internal AbortController(30s) timeouts for browser fetch in createChatV2/executeApiRequest/testToken prevent infinite hangs on failed network operations — S54/S57.
-│   │   ├── auth.js                       # Auth verification + CAPTCHA resolution entry points: checkAuthentication/detect login needed, extract token after manual auth via localStorage.getItem("token") inside page.evaluate(). startManualAuthentication(visible browser for first-time setup where user types email/password → navigates to Qwen sign-in flow guided by console.log prompts that display in terminal during headless mode switch. Uses waitUntil:"domcontentloaded" + 2s RETRY_DELAY before token extraction attempt — gives redirects time to settle after successful GitHub/Email login redirect from Qwen auth providers back to chat.qwen.ai main page → localStorage populated with JWT before proxy resumes API calls (S52/S54). checkVerification(page) page-level verification prompt: detects CAPTCHA challenge detected by isCaptchaChallenge() → triggers resolveCaptchaAndRetry() centralized handler that saves current JWT via extractAuthToken + shutdownBrowser→initBrowser(visible=true) → waits for user to solve slider CAPTCHA in GUI browser window then presses Enter in terminal when done → restarts headless with fresh token/session saved from visible session → retries original API request using new auth context. Protected by _captchaResolverRunning loop guard prevents recursive resolver calls if second CAPTCHA detected during retry cycle — S52.
-│   │   └── session.js                   # Cookie/token extraction + persistence (per-account: session/accounts/{id}/cookies.json or global fallback). saveSession(context, accountId?) → cookies per account directory created via ensureAccountDir(id) that calls fs.mkdirSync with recursive:true — prevents ENOENT errors when adding new accounts that don't have directories yet. loadSession(context, accountId?) restores cookies from file if exists using page.setCookie(...parsedCookiesArray) inside evaluateInBrowser wrapper with 5s timeout → fallback to empty array + logWarn if parse fails (corrupted JSON or format change after Qwen frontend update). clearSession(accountId?) removes saved session files via fs.unlinkSync — used during relogin flow when user wants fresh authentication without clearing global auth_token.txt backup. hasSession(accountId?) checks if cookies.json exists on disk → boolean returned to route layer decides whether to use cached account context or trigger manual add/relogin interactive menu based on token validity (resetAt/invalid fields in tokens.json tracking rate-limits/invalidation state) — S40/S53+.
-│   │
-│   └── utils/                            # Qwen-specific cross-cutting utilities: branding watermark injection into assistant messages, account CLI for add/relogin/remove interactive menus using readline prompt helper imported from shared/utils/prompt.js via ../../../../shared/ relative path resolution (S61)
-│       ├── branding.js                  # ForgetMeAI contact info + watermark prepended to system message prefix so model knows author when generating responses — not visible in streamed chunks, injected after full response received. formatContactInfo(prefix="Contact") returns "Contact: mandrykinsergey@gmail.com | twitch.tv/dnovitv" string used by accountSetup.js CLI display before login prompts to remind user of project attribution during setup flows (S61).
-│       └── accountSetup.js              # Account CLI: addAccountInteractive launches visible browser, waits for Enter after manual auth → extracts + saves token per-account dir in session/accounts/{id}/token.txt. Clears global auth_token.txt before fresh addition to prevent "old token bleed-in" where stale JWT from previous session accidentally picked up by resolveAuthToken during next proxy request — S53+. reloginAccountInteractive lists saved accounts with status labels (Invalid/Cooldown until {time}/OK) → picks account number from user input. Loads saved cookies FIRST via fs.readFileSync → page.setCookie(...parsedArray) before navigating to chat.qwen.ai → if cookies still alive (not expired/reset by Qwen server-side), restores session automatically without re-entering password → saves fresh cookies.json + updates tokenManager list via markValid(id, freshToken). If cookies dead or parse fails → shows login page for manual entry. Saves new cookies after successful relgoin to keep them synced with current auth state — S53+. removeAccountInteractive lists accounts → user confirms deletion (y/N) via readline prompt, then removes token from tokens.json via removeToken(id) + deletes local folder tree recursively using fs.rmSync(dir, { recursive: true, force: true }) — ensures orphaned account directories don't accumulate on disk after removal flows complete without errors.
-│
-│   deepseek/                               # DeepSeek Chat proxy (Cookie + PoW auth via Puppeteer extraction → HTTP fetch API calls)
-│   ├── index.js                            # Entry point: Express app + session menu. Exports startDeepSeekProxy/showAccountMenu. Self-detects main module via import.meta.url check → auto-start if run directly as CLI entry point. Forked from dispatcher with stdio: "inherit" for interactive menus in child process (S61). OpenAI-compatible routes mounted at /api/v1/*: models endpoint returns 6 aliases (deepseek-v3, deepseek-chat, deepseek-r1, deepseek-reasoner, deepseek-expert, deepseek-v4-pro). chat/completions supports streaming (SSE) and non-streaming JSON responses via standard OpenAI delta format { id, object:"chat.completion.chunk", created, model, choices:[{index:0,delta:{role,content}}]} with initial role chunk → content deltas per SSE line parsed from upstream → final stop/final_reason:null→"stop" transition on [DONE] received. CORS middleware relaxed for Zed compatibility (accepts any Authorization header). Uses port env chain: DEEPSEEK_PORT ?? PORT ?? DEFAULT_PORT (shared/config.js fallback). Error handling middleware requires exactly 4 params for Express recognition.
-│   ├── config.js                           # DeepSeek-specific constants: CHAT_API_URL, CHAT_PAGE_URL, PAGE_TIMEOUT(60s), RETRY_DELAY(2s). DEEPSEEK_MODELS map with 7 models: v3/chat/default (default/fast/V4-Flash), r1/reasoner (thinking mode), expert/v4-pro (expert model + optional reasoning). Each config has {model_type, thinking_enabled, search_enabled}. REQUEST_TIMEOUT_MINUTES configurable via env (DEEPSEEK_REQUEST_TIMEOUT default 5 min for long reasoning responses — prevents premature timeout kill during extended analysis phases where model spends 1-3 minutes generating <thinking>....
-│   │
-│   ├── api/                                # API layer — DeepSeek-specific OpenAI-compatible endpoints
-│   │   └── chat.js                         # Message handling, SSE streaming parser (deepseek v0 API format), agent-loop support. ~350 LOC.
-│   │
-│   ├── browser/                            # Puppeteer-based auth + PoW execution in browser context (~800 LOC total)
-│   │   ├── auth.js                         # Cookie/session extraction via Puppeteer one-shot login. Saves cookies to session/deepseek_accounts.json with deep recursive localStorage scan for nested keys (token, wasmUrl, hif_dliq, hif_leim). Fixes INVALID_TOKEN errors when PoW data missing.
-│   │   └── proxyPage.js                    # Browser-init + message sending via Puppeteer. ~700 LOC total. Key exports: initBrowserPage() → creates page with CDP session (Network.enable), captures .wasm URLs via Network.requestWillBeSent listener before navigation (S64). WASM preload strategy: 3-phase approach — (1) CDP interception during initial page load catches auto-loaded solver, (2) JS bundle analysis scans loaded scripts for `.wasm` URL patterns and localStorage/global state if CDP miss (S64), (3) dummy POST to `/completion` triggers server-side challenge → second CDP pass captures lazy-loaded WASM. sendViaBrowser(messages, model, hint) → ensures session via ensureSession(), builds Human:/Assistant: prompt format, resolves DEEPSEEK_MODELS config, uses capturedWasmUrl from init (primary) or page.evaluate performance API search (fallback). PoW solve inside browser context: fetch `/create_pow_challenge` → instantiate WASM module with WebAssembly.instantiate() → call wasm_solve() with challenge bytes → encode answer as Base64 in X-DS-PoW-Response header. chatSessions Map stores conversation_hint → {sessionId, parentMessageId} for session continuity.
-│   │
-│   └── data/                               # Runtime files
-│       └── AvailableModels.txt             # Model aliases list
+└── deepseek/                               # DeepSeek Chat proxy (Cookie + PoW → HTTP fetch)
+    ├── index.js                            # Entry: Express app + session menu. OpenAI-compatible routes
+    │                                       #   at /api/v1/*. 6 model aliases. Port chain: DEEPSEEK_PORT
+    │                                       #   ?? PORT ?? DEFAULT_PORT.
+    ├── config.js                           # DeepSeek-specific: CHAT_API_URL, PAGE_TIMEOUT(60s),
+    │                                       #   DEEPSEEK_MODELS (7 aliases with model_type/thinking/search),
+    │                                       #   REQUEST_TIMEOUT_MINUTES via DEEPSEEK_REQUEST_TIMEOUT env.
+    ├── data/
+    │   └── AvailableModels.txt             # Model aliases (6 models, synced with config)
+    │
+    ├── api/
+    │   └── chat.js                         # Message handling, SSE parser (~350 LOC). sendMessage with
+    │                                       #   PoW solving via powSolver.js, executeApiRequest with direct
+    │                                       #   fetch(), parseSSEStream/parseNonSSEResponse. Session Map.
+    │
+    ├── browser/
+    │   ├── auth.js                         # Cookie/session extraction via Puppeteer (~800 LOC). 3-source
+    │   │                                   #   PoW data collection (JS interceptors, CDP network,
+    │   │                                   #   page.evaluate). Stores to deepseek_accounts.json.
+    │   └── proxyPage.js                    # Browser-init + message sending (~700 LOC). initBrowserPage
+    │                                       #   with CDP session, WASM preload (3-phase strategy),
+    │                                       #   sendViaBrowser with PoW solve in browser context.
+    │
+    └── utils/
+        └── powSolver.js                    # Pure JS PoW solver (SHA3-256 hashcash). Replaces WASM.
+                                            #   solvePoW(challenge) → {nonce, powData: base64}. Uses js-sha3.
 ```
+
+## Key interfaces
+
+| Function / Export | Module | Purpose |
+|---|---|---|
+| `sendMessage()` | `qwenApi.js` | Core Qwen API call — two-path strategy, retry, CAPTCHA resolution |
+| `createChatV2()` | `qwenApi.js` | Create Qwen chat via browser evaluate / Node.js fetch |
+| `resolveQwenChatId()` | `chatSession.js` | 3-level chat ID resolution (map → defaults → create new) |
+| `invalidateQwenChatId()` | `chatSession.js` | Clean ALL maps on "chat_not_exist" error |
+| `parseToolCallParts()` | `toolUtils.js` | Extract tool calls from Qwen JSON response |
+| `applyToolPrompt()` | `toolUtils.js` | Inject tool definitions into system message |
+| `normalizeToolCalls()` | `toolUtils.js` | Convert raw calls → OpenAI format |
+| `buildStatelessTranscript()` | `openaiUtils.js` | Fold history → single user message |
+| `hasOpenAIToolState()` | `openaiUtils.js` | Detect tool calls in message history |
+| `handleApiError()` | `qwenApi.js` | Classify + route errors (401/429/503/generic) |
+| `resolveAuthToken()` | `qwenApi.js` | Token resolution with preferredOwner binding |
+| `getAvailableToken()` | `tokenManager.js` | Round-robin token selection |
+| `withRequestTimeout()` | `timeoutWrapper.js` | Promise timeout wrapper |
+| `evaluateWithTimeout()` | `pagePool.js` | Fast page health check (5s) |
+| `evaluateInBrowser()` | `pagePool.js` | Long-lived browser evaluate (synced to REQUEST_TIMEOUT) |
+| `solvePoW()` | `powSolver.js` | DeepSeek PoW challenge solver (SHA3-256) |
+| `sendViaBrowser()` | `proxyPage.js` | DeepSeek message send via browser context |
+| `initBrowserPage()` | `proxyPage.js` | DeepSeek proxy init with CDP + WASM preload |
+
+## Config constants
+
+| Constant | Default | Module | Description |
+|---|---|---|---|
+| `PORT` | 3264 | `shared/config.js` | Server port |
+| `HOST` | 0.0.0.0 | `shared/config.js` | Server host |
+| `LOG_LEVEL` | info | `shared/config.js` | Logging level |
+| `PAGE_POOL_SIZE` | 3 | `qwen/config.js` | Max idle pages in pool |
+| `MAX_ACTIVE_PAGES` | 5 | `qwen/config.js` | Max concurrent active pages |
+| `PAGE_IDLE_TTL_MS` | 300000 | `qwen/config.js` | Idle page GC TTL (5 min) |
+| `PAGE_GC_INTERVAL_MS` | 60000 | `qwen/config.js` | GC check interval (1 min) |
+| `BROWSER_RESTART_RSS_MB` | 512 | `qwen/config.js` | Memory Guard RSS threshold |
+| `REQUEST_TIMEOUT_MINUTES` | 5 | `qwen/config.js` | Qwen request timeout |
+| `STREAMING_CHUNK_DELAY` | 20 | `qwen/config.js` | SSE chunk delay (ms) |
+| `DEFAULT_MODEL` | qwen-max-latest | `qwen/config.js` | Fallback model |
+| `MAX_HISTORY_LENGTH` | 100 | `qwen/config.js` | Local chat history limit |
+
+## Evaluate helpers
+
+| Helper | Timeout | Purpose |
+|---|---|---|
+| `evaluateWithTimeout(page, fn)` | 5s (EVALUATE_HEALTH_TIMEOUT) | Fast health check — page alive? |
+| `evaluateInBrowser(page, fn, args)` | ~5.5 min (synced to REQUEST_TIMEOUT) | Long-running API calls in browser |
+
+## Dependencies (package.json)
+
+| Dependency | Version | Purpose |
+|---|---|---|
+| express | ^4.18.2 | HTTP server |
+| puppeteer | ^24.31.0 | Browser automation |
+| puppeteer-extra + stealth | ^3.3.6 / ^2.11.2 | Anti-detection |
+| winston | ^3.17.0 | Logging |
+| morgan | ^1.10.0 | HTTP request logging |
+| js-sha3 | ^0.9.3 | DeepSeek PoW solver |
+| openai | ^4.104.0 | OpenAI API client (tool call types) |
+| ali-oss | ^6.18.0 | Alibaba Cloud OSS (file upload) |
+| multer | ^2.0.0 | File upload parsing |
+| dotenv | ^17.4.2 | Env config |

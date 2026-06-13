@@ -3,67 +3,160 @@
 ## High-level overview
 
 ```
-┌─────────────────────── shared/ ───────────────────────┐
-│ config.js   logger/index.js   utils/prompt.js         │
-│  ↑               ↑                ↑                   │
-└── services/qwen/      services/deepseek/          ┘
+index.js ─── dispatcher (child_process.fork)
+    ├── Qwen:    Chromium pool, browser-evaluate fetch, multi-account token rotation, CAPTCHA/WAF resolver
+    └── DeepSeek: Cookie auth via Puppeteer one-shot login, PoW solving, direct HTTP fetch
 
-index.js → dispatcher (fork child_process)
-    ├── Qwen service:  Chromium pool, browser-evaluate fetch, multi-account token rotation, CAPTCHA resolver
-    └─ DeepSeek svc:   Cookie auth extraction via Puppeteer one-shot login → **Persistent Chromium page** (single headless tab) for ALL API calls. Browser context required because DeepSeek web API mandates PoW (Proof-of-Work) solving via WASM module loaded on every request, plus hif-dliq/hif-leim fingerprint headers added by JS interceptors before each fetch call. Uses ~150MB RAM vs Qwen's 500MB+ due to single-page architecture without pool overhead. Shared utilities imported from shared/ using absolute-relative imports like "../../../shared/logger/index.js" — no duplication of logging/prompt/config across providers. Each service forks as separate Node.js process via `child_process.fork(entry, [], { stdio: "inherit" })` so interactive CLI menus in child processes share parent stdin/stdout for readline prompts during authentication/account management flows while maintaining memory/process isolation between provider infrastructures that might use incompatible browser versions or different session storage formats on disk.
+shared/ ─── config.js, logger/index.js, utils/prompt.js
+```
 
-## Two-path strategy (S59→S62) — Qwen only
+Each service runs as isolated Node.js process. Shared utilities imported via relative paths (`../../../shared/logger/...`).
 
-Qwen Chat API uses two execution paths due to **Aliyun WAF**:
-1. ~~Node.js Streaming primary~~ **Removed for `chat/completions`** (S62). WAF blocks all Node-fetch to this endpoint.
-   Still used for `chats/new` (WAF allows it with Bearer token).
-2. **Browser Evaluate (rewritten S62)**: XHR → `fetch()` in main world via `addScriptTag` + DOM event bridge.
-   Key changes: no `Authorization: Bearer` header (HAR analysis proved Qwen frontend doesn't send it,
-   WAF was blocking us because of it). Uses page's native `fetch()` wrapped by Aliyun WAF SDK which
-   automatically adds `bx-ua`, `bx-umidtoken`, `bx-v` headers. Auth via cookies (`credentials: "include"`).
-   Navigation uses `networkidle0` + 2s pause (WAF SDK loads async from `g.alicdn.com/aes/...`).
-   Payload now matches HAR exactly: `version: "2.1"`, corrected `feature_config`.
+## Two-path strategy (Qwen only)
+
+Qwen uses two execution paths due to **Aliyun WAF**:
+
+1. **Path 1 — Node.js fetch**: Used only for `chats/new` (WAF allows it with Bearer token).
+2. **Path 2 — Browser evaluate** (primary for `chat/completions`): XHR → `fetch()` in main world via page's native fetch wrapped by Aliyun WAF SDK. No `Authorization: Bearer` header. Auth via cookies (`credentials: "include"`). Navigation uses `networkidle0` + 2s pause for WAF SDK async load.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Express
+    participant QwenAPI
+    participant Browser
+    
+    Client->>Express: POST /api/v1/chat/completions
+    Express->>Express: authMiddleware (API key check)
+    Express->>Express: resolveQwenChatId (3-level fallback)
+    Express->>QwenAPI: sendMessage()
+    
+    alt WAF not detected
+        QwenAPI->>QwenAPI: Path 1: Node.js fetch
+    else WAF detected (aliyun_waf meta)
+        QwenAPI->>Browser: Path 2: evaluateInBrowser(fetch)
+        Browser->>QwenAPI: SSE stream or JSON response
+    end
+    
+    QwenAPI->>Express: parse response, extract tool_calls
+    Express->>Client: SSE or JSON response
+```
 
 ## Request lifecycle — normal flow (no tools)
-Qwen: POST /api/v1/chat/completions → Express router authMiddleware(API keys check via Authorization header Bearer token matching entries in services/qwen/data/Authorization.txt file). Middleware validates JSON body limit 150mb enforced at bodyParser.json layer. OpenAI message parsing + tool state detection `hasOpenAIToolState(messages)` returns false if no assistant.tool_calls present → skip agent-loop routing path, go directly to normal chat flow. Chat ID resolution via resolveQwenChatId: layered fallback (chatIdMap lookup first → modelDefaultChats if no map match exists yet for this conversation_id → create new Qwen chat session automatically + save mapping). Token selection from available pool via getAvailableToken round-robin across valid tokens not marked invalid/resetAt cooldown expired. Payload construction buildPayloadV2(messages, system_message optional, tools_prompt injected into user content prefix for continuation turns since Qwen ignores system_message on existing chats — S3 workaround via dual injection: BOTH first-turn payload AND every subsequent turn prepends tool instructions so model always knows protocol regardless of whether server reads it or not. sendMessage → two-path strategy (S59). SSE stream delivered to client with per-chunk delay STREAMING_CHUNK_DELAY(20ms default) between writes for smooth Unicode safety via 16 code points per write operation instead of bytes — handles CJK/multibyte correctly without split grapheme cluster errors during streaming delivery phase where partial characters cause mojibake in terminal clients that decode UTF-8 incrementally as chunks arrive over HTTP connection before full response buffered client-side. [DONE] delimiter sent when final stop/final_reason received or stream abort fires after 3min reader timeout inside evaluateInBrowser (S57) — returns partial content instead of hanging indefinitely if Qwen holds CDP open without producing more tokens during extended reasoning phases where model thinks silently behind the scenes before generating visible answer text.
-DeepSeek: POST /api/v1/chat/completions → Express router CORS headers middleware auto-applied. Session validation hasValidSession() checks stored cookies + authData exist in services/session/deepseek_accounts.json file on disk — if missing or corrupted parse fails, returns 401 JSON error telling user to run authorization via browser auth flow first (menu option "1 - Войти в DeepSeek"). Messages folded into single content string (history appended as role-prefixed lines before last user message since web API takes last user message only). **Proxy init on first request**: `initBrowserPage()` restores cookies + localStorage via Puppeteer, enables CDP network capture for WASM interception (`enableProxyNetworkCapture`), navigates to chat.deepseek.com, waits 5s for resources, runs `checkAuthViaApi()` (checks cookie on BOTH domains: `chat.deepseek.com` + `.deepseek.com`, falls back to userToken in localStorage). **PoW solving**: each request calls `findWasmUrl()` (CDP-captured URL priority → performance API → config search) then solves PoW inside browser context via WASM solver. **Browser fetch**: all API calls execute INSIDE Chromium page.evaluate() context with credentials="include" — cookies sent automatically, PoW header added as X-DS-PoW-Response if solved. SSE parser extracts `{ p: "...", v: "..." }` chunks from upstream response. Thinking phase separated via `response/thinking_elapsed_secs` event marker → switches to answer tokens after thinking completes. Initial role delta { role: "assistant" } sent first, then content deltas per SSE line parsed until `[DONE]`. Final chunk transitions finish_reason null→stop. Log output shows model name + timing + character count on completion for audit trail visibility during proxy operation sessions where multiple concurrent chats might be active across different conversation_id scopes simultaneously if client supports multi-session routing like OpenWebUI background meta-requests that get isolated into separate effectiveChatId=null contexts via isOpenWebUiMetaRequest() filter preventing contamination of main user conversations — S48/S57.
+
+### Qwen
+
+1. POST `/api/v1/chat/completions` → Express router
+2. **Auth middleware**: validates `Authorization: Bearer` against `Authorization.txt`
+3. **Message parsing**: `parseOpenAIMessages()` extracts system message + user content
+4. **Chat ID resolution**: `resolveQwenChatId()` — layered fallback:
+   - `chatIdMap` (cached mapping)
+   - `modelDefaultChats` (per-model default)
+   - `createChatV2()` (new Qwen chat)
+5. **Token selection**: `getAvailableToken()` — round-robin across valid tokens
+6. **Payload construction**: `buildPayloadV2()` with `feature_config`
+7. **Send via two-path strategy** → SSE stream delivered with `STREAMING_CHUNK_DELAY` (20ms) in 16-code-point chunks
+8. `[DONE]` delimiter sent when finish_reason received; 3min SSE reader abort returns partial content on timeout
+
+### DeepSeek
+
+1. POST `/api/v1/chat/completions` → Express router
+2. **Session validation**: `hasValidSession()` checks stored cookies + authData
+3. **Message folding**: history appended as role-prefixed lines (last user message only)
+4. **Proxy init on first request**: `initBrowserPage()` restores cookies + localStorage, enables CDP capture
+5. **PoW solving**: fetch challenge from `/create_pow_challenge`, solve via WASM (`js-sha3`), send as `X-DS-PoW-Response`
+6. **API call**: direct `fetch()` with cookie string + PoW header
+7. **SSE parsing**: extract `{ p, v }` chunks from upstream, send as OpenAI delta chunks
 
 ## Request lifecycle — tool calling (agent loop)
-Qwen-specific: when `hasOpenAIToolState(messages)` returns true → agent-loop routing triggered with deferred auto-reset logic (S22). Tool calls injected via applyToolPrompt(system + toolsToLightPrompt for subsequent turns instead of full schema on every round-trip to save token budget — compact format drops redundant descriptions kept only on initial turn where model needs complete function signatures upfront before it starts calling them repeatedly in loop. Response captured entirely when captureToolCalls=true blocks normal streaming callback temporarily → collected raw text parsed through parseToolCallParts(JSON extraction, brace repair if truncated at end due to Qwen aborting mid-generation leaving `[}`/`]` garbage — S38 _stripTrailingBracketGarbage trims trailing `[]{}\s]+` patterns at all exit points). Normalized via normalizeToolCalls(id + type:function/arguments → OpenAI format expected by agent-loop routing layer. Anti-loop detection: getRepeatedToolCalls tracks name+args signature hash → if same call repeats >TOOL_CALL_RESET_THRESHOLD times without new content appearing in response, triggers force fold via buildStatelessTranscript (keeps head 5 messages + tail 10, discards middle as statistics summary prepended to system prefix). Cooldown delay 1s between agent-loop iterations prevents tight retry storms that cause "chat is in progress" errors more frequently when requests flood Qwen faster than SSE session cleanup timing allows on server-side — S42/S39. Same-chat backoff ~2s/4s up to max 3 attempts before escalating to fresh chat creation fallback which loses tool-calling context continuity across iterations but better than infinite hang waiting for stale connection that will never complete because Qwen killed its internal session already without notifying proxy layer directly via HTTP status code — only visible through payload rejection with `"chat is in progress"` detail string that handleApiError parses + routes appropriately based on retry budget exhausted or not yet determined after exhaustive checks of all available resolution paths including early mapChatId save before waiting for SSE response so timeout doesn't lose association between generated `chat_XXXXX` ID and real internal UUID returned by Qwen creation endpoint — S57.
-DeepSeek: native OpenAI tool_calls support at API level means routing logic identical to standard ChatGPT/claude integration patterns where agent-loop happens entirely in routes layer without custom JSON parse roundtrip needed since proxy just passes messages through as-is via HTTP POST with proper headers + cookies, receives streaming response that includes `tool_calls` field directly in delta chunks when model decides to call functions instead of generating text content. No prompt injection required because DeepSeek web API understands standard OpenAI format natively — unlike Qwen where we had to build entire custom tool protocol from scratch via system message prepending + JSON extraction post-response due to complete lack of native function calling support in their chat completion endpoint design choices made by Alibaba Cloud team during development phase before open-sourcing model weights later without updating API spec accordingly.
 
-## Chat ID resolution (layered fallback) — Qwen only
-resolveQwenChatId flow:
-1. Check chatIdMap first → returns cached qwenChatId if conversation_id already mapped from previous message in same session.
-2. Fallback to modelDefaultChats per-model default → auto-created when no explicit `chat_XXXXX` ID provided by client (Zed Agent typically doesn't send conversation IDs, relies entirely on proxy mapping + persistence layer). Creates new chat via createChatV2 browser evaluate (JWT inject fallback: Node.js fetch) if none exists yet for target model. Saves to both maps simultaneously + binds token owner via setChatTokenOwner(realQwenChatId, tokenId) so future rotation doesn't pick random account → "not exist" errors when trying send message to chat belonging to Account B using token from Account A that never created it originally — S53+/S46 hard binding guarantees chats stay with creating account even across restarts or rate-limit cooldown cycles where other accounts might be temporarily selected during round-robin selection if preferredOwnerId lookup fails for some reason (corrupted Map state after crash recovery scenario).
-3. Early mapChatId call BEFORE waiting for SSE response — saves mapping immediately so 5-minute timeout doesn't lose association between generated ID and real UUID that only becomes known AFTER creation completes successfully upstream at Qwen server-side where they return chat object with internal identifier embedded in JSON payload response body before streaming begins. If `forceNewChat` header present (x-new-chat / x-reset-chat:true), generates fresh UUID + resets parentId=null to start clean thread without inheriting tool-calling context from previous conversation history that might contain stale assistant.tool_calls references causing malformed requests when continuing old chats after extended idle periods where Qwen invalidated sessions server-side.
-On "chat_not_exist" error detected via isChatNotExistError() checking `/not exist/i` in result.details string match: invalidateQwenChatId cleans ALL maps (chatIdMap, modelDefaultChats, sessionToChatMap, chatTokenOwner) → retry request EXACTLY ONCE when `retryCount===0`. Second attempt always creates brand-new chat via createChatV2 flow described above. Never retries same deleted UUID again because Qwen permanently removes chats after bulk delete operations or cache expiry cleanup runs on their infrastructure side — S46/S57.
-DeepSeek: simple in-memory Map<conversation_id → deepseek_chat_id> stored in services/deepseek/api/chat.js getChatId/setChatId exports. No layered fallback needed because DeepSeek API doesn't require explicit chat session management via separate creation endpoint — each POST to /api/v0/chat/completion starts fresh interaction with content payload carrying all context needed inline without dependency on server-side persisted conversation state that must be referenced by external ID strings later during continuation turns like Qwen expects. Trade-off: shorter memory window per request since full history folded into single user message content string before send means DeepSeek model sees entire conversation context upfront but loses ability resume specific threads if client disconnects mid-stream and reconnects using same `chat_XXXXX` identifier because proxy doesn't store persistent mapping between generated IDs and actual upstream session identifiers that would allow cross-request continuity beyond memory scope of current process instance. Acceptable limitation for lightweight design philosophy where startup speed + low RAM footprint prioritized over stateful multi-session persistence across restart boundaries — S61 architecture decision documented in 01_STATUS.md Provider Comparison table comparing Qwen vs DeepSeek capabilities/features side-by-side during selection phase when user chooses provider via dispatcher menu at project root index.js entry point.
+### Qwen
 
-## Timeout architecture (S53+)
-Qwen: withRequestTimeout(Promise, ms) wrapper for REQUEST_TIMEOUT_MINUTES enforcement via Promise.race against setTimeout reject. Used by routes.js POST handler → wraps sendMessage() call — if Qwen SSE stream doesn't produce final [DONE] or error within configured time window (default 5 min, env var: REQUEST_TIMEOUT_MINUTES), returns partial content with "timed_out" finish_reason instead of hanging client connection indefinitely. Prevents OOM from abandoned CDP sessions during failed generations where browser evaluate held open by long-lived fetch inside Chromium tab that never receives completion signal due to upstream network failure or model silently timing out without HTTP status code indication — only detectable via absence of data arriving over time rather than explicit error payload returned in response body.
-3min SSE reader abort inside evaluateInBrowser uses setTimeout + reader.cancel() → returns partial content instead of hanging for full REQUEST_TIMEOUT_MINUTES(5m+) when Qwen holds CDP open indefinitely without producing tokens during extended reasoning phases where thinking happens silently behind the scenes before generating visible answer text that appears as delta chunks in stream eventually after model decides finished analyzing input context. Protocol timeout (~180 min default, calculated from `REQUEST_TIMEOUT × 60 + 30s`) prevents Puppeteer CDP disconnect before wrapper fires — ensures evaluateInBrowser long-lived timeout synced so connection survives entire generation window regardless how long model takes complete complex tasks like codebase analysis spanning multiple files with cross-references requiring deep semantic understanding before producing coherent output that satisfies original prompt intent fully.
-DeepSeek: configurable per-service timeout via `DEEPSEEK_REQUEST_TIMEOUT` env var (default 5 min). AbortController signal passed to fetch → cancels request if no data arrives within window + handles timeout gracefully without crashing parent process or leaving zombie Chromium browser windows open consuming resources after failed auth extraction completes unsuccessfully due to corrupted cookies file preventing re-login flow from triggering automatic visible browser launch where user would normally complete CAPTCHA manually then press Enter in terminal when done solving slider challenge presented by CloudFront protection layer during initial session establishment phase only — subsequent API calls use stored cf_clearance + session cookies via HTTP headers bypassing browser entirely since direct Node.js fetch works transparently with cookie string constructed from parsed JSON array loaded from disk at startup using getStoredCookies() export from services/deepseek/browser/auth.js module. Eliminates need for persistent Chromium page pool overhead that Qwen requires due to Aliyun WAF blocking pure HTTP clients returning HTML challenge pages disguised as 200 OK responses instead of standard error codes making automated retry detection impossible without inspecting body content via regex-free `.includes()` checks per provider rules against Qwen Chat Web API design decisions made by Alibaba Cloud engineering team during development phase before open-sourcing model weights later — S53+/S61 architectural context documented across multiple sections showing evolution from single-provider monolith towards multi-process isolation pattern where each service runs independently with own browser/auth/memory management tailored specifically for upstream protection mechanisms deployed by target provider platform operators who constantly update anti-bot strategies requiring different bypass approaches per vendor depending on infrastructure stack choices like CloudFront vs Aliyun WAF versus custom solutions built in-house using fingerprinting behavioral analysis heuristics beyond simple IP reputation scoring seen across most commercial LLM hosting providers today as industry matures post-2024 AI agent boom period when automated tool-use workflows became mainstream capability expected from capable models rather than novelty feature demonstrated during early chatbot era circa 2023 timeframe.
-
-## Error retry policy
-Qwen-specific: handleApiError classifies + routes errors appropriately based on HTTP status codes returned by upstream API layer after initial request attempted via two-path strategy (S59). Classification matrix:
-- 401 Unauthorized → rotate token, mark current invalid if repeated across multiple accounts until pool exhausted then fail fast rather than spinning indefinitely trying dead credentials that will never authenticate successfully against Qwen server-side validation logic which checks JWT signature+expiry timestamps embedded in localStorage token extracted during manual auth flow + saved via extractAuthToken page.evaluate(localStorage.getItem("token")) call inside browser context where cookies remain valid after headless switch prevents session invalidation when Puppeteer closes window then restarts background mode without GUI — S41/S52.
-- 429 RateLimited → mark rate-limited with resetAt timestamp set 24h forward by default unless custom hours value passed via config override allowing operators tune cooldown windows based on observed upstream throttling behavior during heavy usage periods when multiple Zed Agent instances hammer same account faster than Qwen server allows per their internal rate-limit counters that track requests-per-minute window sliding across IP+token combination rather than pure global pool where rotating accounts wouldn't help if all IPs share same datacenter exit node used by hosting provider infrastructure — S53+/S60.
-- 503 overload/CAPTCHA → trigger resolveCaptchaAndRetry or backoff retry with exponential-ish delay (5s→10s per attempt up to MAX_RETRY_COUNT=3 default from config.js). Both Qwen CAPTCHA (`FAIL_SYS_USER_VALIDATE`) detected via isCaptchaChallenge extended checks covering 5 WAF signals using `.includes()` — no regex against provider rules requiring pure string matching only — S52/S60. And Aliyun Cloud Front WAF returning HTML challenge pages disguised as HTTP 200 OK responses containing aliyun_waf meta tags + `_waf_is_mob` console override script markers that indicate automated browser detection triggered during fingerprinting phase before allowing legitimate traffic through once slider solved manually by human operator guided via visible Chromium window launched headed mode where CAPTCHA resolver saves JWT before shutdown→init cycle completes then restarts headless using fresh session saved from GUI context after Enter press confirms challenge cleared successfully upstream — S48/S52/S53+.
-- generic errors → return error JSON with details string preserved for client-side logging/debugging without exposing internal proxy implementation specifics like "evaluateInBrowser timeout fired" or "pagePool exhausted 5/5 pages checked out concurrently MAX_ACTIVE_PAGES limit reached" messages that might confuse external consumers expecting standard OpenAI-compatible error format used across providers uniformly regardless upstream infrastructure differences causing divergent failure modes per vendor platform operator deployment choices made during scaling phases post-launch periods where capacity constraints become visible under sustained heavy automated tool-use workloads typical of coding agent scenarios driving demand for multi-provider routing strategies exactly why ZApi evolved from single Qwen-only monolith into modular architecture described across this document enabling future expansion beyond two providers documented currently via additional entries added to SERVICES array defined at root index.js dispatcher entry point following pattern established during S61 refactoring session when old src/ directory tree moved under services/qwen/ structure preserving all existing functionality while extracting shared utilities upstream into common module pool reused across vendor implementations avoiding duplication of logging/prompt/config infrastructure code that would otherwise bloat each service independently as team adds more targets like Gemini/Claude/Doubao platforms planned for Q3 2026 roadmap pending API access negotiations + bypass feasibility research sessions scheduled monthly during off-hours maintenance windows between active development sprints focused primarily on stabilizing current dual-provider foundation before expanding attack surface further by introducing additional upstream dependencies that bring their own unique protection mechanisms requiring dedicated solver modules per vendor rather than universal approach attempted initially via generic HTTP client wrappers that failed against Aliyun WAF returning HTML challenge pages instead of machine-parseable error codes forcing migration towards browser-evaluate fetch strategy described extensively throughout S53-S60 changelog entries documenting iterative improvement process driven by real-world operational experience running proxy 24/7 across 50+ agent sessions spanning June 7-11 timeframe when project reached current GREEN health status indicating no blocking issues preventing normal usage patterns observed during production deployment testing phases preceding public documentation release now occurring via this comprehensive architecture guide covering all critical flows from high-level dispatcher design down through low-level evaluate timeout synchronization details showing depth understanding required maintain robust automated bridge between commercial LLM web UIs designed interactive human consumption patterns originally intended before AI agent tool-use workflows became mainstream capability expected capable models deliver reliably today post-2024 industry maturation period.
-
-## CAPTCHA / WAF challenge resolution flow (S48, refactored S52)
-Qwen-specific: isCaptchaChallenge detects both Qwen slider (`FAIL_SYS_USER_VALIDATE`) + Aliyun CloudFront WAF returning HTML disguised as 200 OK with aliyun_waf meta tags indicating automated browser detected during fingerprinting phase before allowing legitimate traffic through once challenge solved manually via visible Chromium window launched headed mode where CAPTCHA resolver saves JWT via extractAuthToken → shutdownBrowser→initBrowser(visible=true) wait for user solve slider+press Enter in terminal when done confirming cleared upstream successfully then restarts headless using fresh session saved from GUI context. Protected by `_captchaResolverRunning` loop guard prevents recursive calls if second challenge detected during retry cycle — S52/S53+. SIMULATE_CAPTCHA=true env triggers one-shot fake on first request for testing full resolver cycle without real CAPTCHA appearing during dev sessions where operator wants verify integration works correctly before deploying changes production environment affecting live users who depend proxy availability continuously across extended coding marathons spanning multiple hours uninterrupted tool-use flows driving demand reliable infrastructure capable handling upstream throttling gracefully via backoff strategies + token rotation mechanisms described handleApiError section above showing classification matrix routing errors appropriately per HTTP status code returned by Qwen API layer after initial request attempted via two-path strategy (S59) covering both Node.js streaming primary fast fetch path + browser-evaluate fallback activated ONLY when WAF detected response containing `aliyun_waf` markers forcing immediate switch paths without retrying same blocked IP/token combo again futile attempt described S60 forceBrowserFallback condition extended isCaptchaChallenge detection signals using `.includes()` against provider rules requiring pure string matching only — no regex allowed.
-DeepSeek: CloudFront Turnstile during initial browser auth extraction via Puppeteer visible login flow where user completes CAPTCHA manually before pressing Enter confirm done then cookies dumped to JSON file stored services/deepseek/session/cookies.json disk persistence layer loaded subsequent API calls bypassing browser entirely since direct Node.js fetch works transparently cookie string constructed parsed array eliminating need persistent Chromium overhead Qwen requires due Aliyun WAF returning HTML challenge pages disguised 200 OK responses instead standard error codes making automated retry detection impossible without inspecting body content via regex-free checks provider rules requiring pure matching only.
-
-## Stream reader hang prevention (S48)
-Qwen-specific: All SSE reader loops use `Promise.race(reader.read(), timeout)` with 5s first-chunk deadline → if no chunk arrives within window, falls back parseNonSseCompletionBody shared parser detects ret[] errors HTTP codes captcha/overload signals JSON bodies returned 200 status without actual streaming data flowing over connection indefinitely blocking CDP session locking entire page preventing other concurrent requests acquire available slots pool exhausted reaches MAX_ACTIVE_PAGES=5 hard limit enforced pagePool.js checkout logic rejects further getPage attempts returning null signal upstream routes layer retry/backoff until slot freed via releasePage(validate before return → close invalid/closed suppress Target closed errors safeClosePage recursion fix calls page.close directly not itself recursively — S45. Memory Guard RSS check every MEMORY_CHECK_INTERVAL(20 default) getPage calls trigger restartBrowserIfLeaking exceeds BROWSER_RESTART_RSS_MB(512 threshold) graceful shutdown old Chromium init new one fresh cookies loaded session/accounts/{id}/cookies.json prevents OOM kills long agent loops where browser heap grows monotonically DOM accumulates repeated chat page navigations without GC opportunity requests
- — S31/S45.
-DeepSeek: AbortController signal passed fetch → cancels request timeout fires gracefully crashing parent process leaving zombie Chromium
- windows open consuming resources failed auth extraction completes unsuccessfully corrupted cookies file preventing re-login flow triggering automatic visible browser launch user normally complete CAPTCHA manually press Enter terminal done solving slider presented CloudFront protection layer initial session establishment only — subsequent calls use stored cf_clearance + session cookies HTTP headers bypassing browser entirely direct Node.js fetch works transparently
- string constructed parsed JSON array loaded disk startup getStoredCookies() export services/deepseek/browser/auth.js module eliminating need persistent pool overhead Qwen requires Aliyun WAF blocking pure clients returning HTML disguised 200 OK instead standard codes automated detection impossible body inspect regex-free includes checks provider rules requiring pure matching only.
-
-## Account management (S53+)
-Qwen-specific: Token resolution flow resolveAuthToken(browserContext preferredOwnerId) → tries preferredOwner→token first before rotating round-robin across valid pool marked invalid/resetAt cooldown expired prevent cross-account "not exist" errors when sending message chat belonging Account B using token Account A never created originally — S53+/S46 hard binding via setChatTokenOwner/getChatTokenOwner maps chatTokenOwner Map<qwenChatId→tokenId> binds creating account future rotation picks random invalidates entire pool marking all remaining rate-limited 24h forward custom hours config override operators tune cooldown observed upstream throttling heavy usage multiple Zed instances hammer same faster allows internal counters track IP+token combination rather pure global where rotating wouldn't help IPs share datacenter exit node hosting infrastructure — S53+/S60. Add account flow: addAccountInteractive clears stale auth_token.txt launches visible browser waits Enter after manual login extracts saves token per-account dir session/accounts/{id}/token.txt updates list restarts headless prevents "old token bleed-in" where stale JWT previous accidentally picked next request S53+. Relogin: reloginAccountInteractive lists saved with status labels Invalid/Cooldown until {time}/OK picks number input loads cookies FIRST fs.readFileSync → page.setCookie(...parsedArray) before navigate chat.qwen.ai → if still alive (not expired/reset server-side) restores automatically without re-entering password saves fresh cookies.json + updates tokenManager via markValid(id, freshToken). If dead/parse fails shows login page manual entry saves new after successful keeps synced current auth state S53+.
-DeepSeek: showAccountMenu displays status based hasValidSession() checking stored cookies+authData exist in services/session/deepseek_accounts.json file on disk. Auth flow (addAccountInteractive): launches visible Puppeteer Chromium with CDP network capture + JS interceptors, navigates chat.deepseek.com for manual GitHub/Google login → user sends message to trigger PoW module load → waits 8s for WASM initialization → extracts cookies (multi-domain), localStorage (userToken+bearerToken), sessionStorage. **PoW data collection from 3 sources**: (1) JS interceptors capture hif-dliq/hif-leim headers from fetch/XHR, (2) CDP network capture finds .wasm resources + final headers post-JS-modification, (3) page.evaluate() searches performance entries, config stores, global vars. Merged with priority: JS > CDP > resource search for each field. Stored as cookies[]+authData{token,bearerToken,wasmUrl,hif_dliq,hif_leim,x_client_version}+storage{ls,ss}. **Proxy init**: headless Chromium restored from saved session via page.setCookie()+localStorage restore → CDP capture enabled → navigate + wait 5s → checkAuthViaApi() validates cookies on both domains (chat.deepseek.com+.deepseek.com) with localStorage fallback. clearSession removes deepseek accounts from JSON array allowing fresh login flow.
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Express
+    participant QwenAPI
+    
+    Client->>Express: POST (with tool results)
+    Express->>Express: hasOpenAIToolState = true
+    Express->>Express: applyToolPrompt(system + tools)
+    Express->>QwenAPI: sendMessage(captureToolCalls = true)
+    QwenAPI->>QwenAPI: Collect raw response (streaming disabled)
+    QwenAPI->>Express: Raw JSON text
+    Express->>Express: parseToolCallParts() → normalizeToolCalls()
+    
+    alt Tool calls found
+        Express->>Client: SSE with tool_calls deltas
+        Client->>Express: Next turn with tool results
+        Express->>Express: toolsToLightPrompt() (compact schema)
+        Express->>QwenAPI: sendMessage() (next iteration)
+    else No tools (text response)
+        Express->>Client: SSE with content deltas + [DONE]
+    end
 ```
+
+Key points:
+- `captureToolCalls = true` disables normal streaming callback
+- Response collected entirely, parsed via `parseToolCallParts()` with brace repair
+- Anti-loop: `getRepeatedToolCalls()` tracks name+args signature; `>TOOL_CALL_RESET_THRESHOLD` repeats → force fold via `buildStatelessTranscript()`
+- Cooldown 1s between iterations; same-chat backoff ~2s/4s up to 3 attempts before fresh chat fallback
+
+### DeepSeek
+
+Native OpenAI `tools[]` format supported by underlying API. No prompt injection or JSON parse roundtrip needed — proxy passes messages through as-is.
+
+## Chat ID resolution (Qwen only)
+
+`resolveQwenChatId()` flow:
+
+1. **chatIdMap** → returns cached qwenChatId if conversation_id mapped
+2. **modelDefaultChats** → per-model default, auto-created when no `chat_XXXXX` provided
+3. **createChatV2()** → creates new Qwen chat via browser evaluate (Node.js fetch fallback). Saves to both maps + binds token owner (`setChatTokenOwner()`)
+
+On `"chat_not_exist"` error (`/not exist/i` in details): `invalidateQwenChatId()` cleans ALL maps → retry exactly once with fresh chat.
+
+DeepSeek: simple in-memory `Map<conversation_id → session_id>` in `chat.js`. No creation endpoint needed.
+
+## Timeout architecture
+
+| Layer | Scope | Default | Mechanism |
+|-------|-------|---------|-----------|
+| Request wrapper | Full HTTP request | 5 min | `withRequestTimeout()` — Promise.race vs setTimeout |
+| SSE reader abort | SSE stream inside browser | 3 min | `setTimeout` + `reader.cancel()` → partial content |
+| CDP protocol | Puppeteer page.evaluate | ~5.5 min | `protocolTimeout` synced from `REQUEST_TIMEOUT_MINUTES` |
+
+DeepSeek: `DEEPSEEK_REQUEST_TIMEOUT` env var (default 5 min). `AbortController` signal passed to `fetch()`.
+
+## Error retry policy (Qwen)
+
+| HTTP Status | Classification | Action |
+|-------------|---------------|--------|
+| 401 | Unauthorized | Rotate token, mark invalid |
+| 429 | RateLimited | Mark with `resetAt` + 24h cooldown |
+| 503 / CAPTCHA | Overload | `resolveCaptchaAndRetry()` or backoff (5s→10s, max 3 retries) |
+| Generic | Unknown | Return error JSON with details |
+
+## CAPTCHA / WAF challenge resolution (Qwen)
+
+`isCaptchaChallenge()` detects both Qwen slider (`FAIL_SYS_USER_VALIDATE`) and Aliyun WAF (HTML with `aliyun_waf` meta tags).
+
+Flow: save JWT → shutdownBrowser → initBrowser(visible) → user solves slider → Enter → restart headless → retry original request.
+
+Protected by `_captchaResolverRunning` loop guard. `SIMULATE_CAPTCHA=true` env for testing.
+
+## Account management
+
+### Qwen
+
+- **Add account**: `addAccountInteractive()` — clears old token, launches visible browser, waits for manual login, saves token per-account
+- **Relogin**: `reloginAccountInteractive()` — tries saved cookies first, falls back to manual login
+- **Remove**: `removeAccountInteractive()` — deletes token + account directory
+- **Binding**: `chatTokenOwner` Map binds chats to creating account — prevents cross-account "not exist" errors
+- **Token Manager**: `tokenManager.js` — round-robin rotation, rate-limit tracking, invalidation
+
+### DeepSeek
+
+- **Auth**: `addAccountInteractive()` — launches visible Puppeteer with CDP capture, extracts cookies + PoW data from 3 sources (JS interceptors, CDP network, page.evaluate)
+- **Session**: stored as `deepseek_accounts.json` (cookies + authData + storage)
+- **Clear**: `clearSession()` removes account from JSON array

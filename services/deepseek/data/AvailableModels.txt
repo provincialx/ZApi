@@ -1,6 +1,15 @@
 # DeepSeek Web API — доступные модели
-# deepseek-v3 — стандартная модель (быстрая, без thinking)
+# deepseek-v3 — стандартная модель V4 Flash (быстрая, без thinking)
 deepseek-v3
+deepseek-chat
+deepseek-default
 
-# deepseek-r1 — reasoning model с расширенным анализом (медленнее, лучше для кода/математики)
+# deepseek-r1 — reasoning model с расширенным анализом (V4 Flash + thinking)
 deepseek-r1
+deepseek-reasoner
+
+# deepseek-expert — экспертная модель V4 Pro (без thinking)
+deepseek-expert
+
+# deepseek-v4-pro — экспертная модель V4 Pro + reasoning
+deepseek-v4-pro
