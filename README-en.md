@@ -1,29 +1,33 @@
-# ZApi — Local OpenAI-Compatible API via Qwen Chat
+# ZApi — Multi-Provider OpenAI-Compatible API Proxy
 
 ![Contact](https://img.shields.io/badge/Contact-mandrykinsergey@-blue)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-green)
-![Qwen](https://img.shields.io/badge/Qwen-Chat-purple)
+![Providers](https://img.shields.io/badge/Providers-Qwen+|+DeepSeek-purple)
 
-> **Turns [Zed.dev](https://zed.dev/) into a full AI agent** using your Qwen Chat web account.
+> **Turns [Zed.dev](https://zed.dev/) into a full AI agent** using your Qwen Chat and/or DeepSeek web accounts.
 > Contact: `mandrykinsergey@gmail.com` | [twitch.tv/dnovitv](https://www.twitch.tv/dnovitv)
 
 ## What is this?
 
 Zed.dev is one of the fastest code editors available. It has a built-in AI agent that can read files, run terminal commands, and write code based on your prompts. But **Zed doesn't include a model** — it just talks to an OpenAI-compatible API.
 
-ZApi bridges Zed and the Qwen Chat web app (`chat.qwen.ai`). It launches a headless browser, authenticates with your Qwen account, and serves model responses at `http://localhost:3264/api` in standard OpenAI format.
+ZApi bridges Zed with free web-based LLM services (Qwen Chat, DeepSeek). It handles authentication, WAF bypass, and Proof-of-Work solving, then serves model responses at `http://localhost:3264/api` in standard OpenAI format.
 
-**Result:** Zed Agent gets full access to Qwen's powerful models — it can read your codebase, edit files, and run terminal commands as a fully autonomous agent. All for free (using a basic Qwen Chat account).
+**Result:** Zed Agent gets access to powerful models — it can read your codebase, edit files, and run terminal commands as a fully autonomous agent. All for free using basic web accounts.
 
-**This is not a locally downloaded model** and **not an official Alibaba API**. It's a browser-based proxy.
-
-**Why this fork?** Most forks only return plain text. This one adds full `tool calling` — the model can invoke external tools (`read_file`, `write_file`, `terminal`) and operate in an automatic agent-loop cycle. That's the key advantage over other projects.
+**This is not a locally downloaded model** and **not an official API**. It's a browser-based proxy with multi-provider support.
 
 ```text
-Zed Agent    →  ZApi (localhost:3264)  →  Headless Browser (Puppeteer)  →  chat.qwen.ai
-         ↑_________________________________________________________↓___________________________↓
-                              Response + tool calls (OpenAI format)
+Zed Agent → ZApi (localhost:3264) ─┬─ Qwen    (Puppeteer + WAF bypass)
+                                   └─ DeepSeek (PoW solver + HTTP fetch)
 ```
+
+## Agent Capabilities
+
+| Provider | Agent Status | Details |
+|----------|-------------|---------|
+| **Qwen** | ✅ Full agent | Tool calls, file read/write, agent-loop, SSE streaming. **Actively developed.** |
+| **DeepSeek** | ⚠️ Read-only | Can read files via tools, but **cannot edit/write them** yet. API supports it, integration pending. |
 
 ## Getting Started
 
@@ -36,23 +40,35 @@ cd ZApi
 npm install
 ```
 
-### 2. Add a Qwen account
-This opens a Chromium browser window. Log in to your account at `chat.qwen.ai`, then close the browser. Tokens are saved automatically to the `session/` folder.
+### 2. Start the dispatcher
 ```bash
-npm run auth -- --add
+node index.js
+```
+You'll be prompted to choose a provider:
+- **1 — Qwen** (full agent, WAF bypass, multi-account)
+- **2 — DeepSeek** (read-only agent, PoW solver, lightweight)
+
+### Qwen setup (recommended for full agent)
+
+Add a Qwen account (opens a Chromium browser window — log in at `chat.qwen.ai`, then press Enter):
+```bash
+node scripts/auth.js
+# Menu → option 1 — Add new account
 ```
 
-### 3. Sync models and start the server
+Then start with `SKIP_ACCOUNT_MENU=true` for headless mode:
 ```bash
-npm run models:sync         # fetches the latest list of available models (qwen3-coder-plus, qwen3-max...)
-SKIP_ACCOUNT_MENU=true npm start
+SKIP_ACCOUNT_MENU=true node index.js
+# Select 1 — Qwen
 ```
 
-### 4. Verify it works
-The server is ready on port `3264`. Run the built-in health check:
-```bash
-npm run smoke
-```
+### DeepSeek setup
+
+Select option 2 — DeepSeek from the dispatcher menu, then:
+1. Choose **1 — Login to DeepSeek** (opens a browser — log in via GitHub/Google)
+2. Send any message to trigger Proof-of-Work module load
+3. Press Enter. Session saved automatically.
+4. Choose **3 — Start proxy**.
 
 ## Connecting to Zed.dev
 
@@ -60,63 +76,68 @@ npm run smoke
 2. Open settings: `Cmd+Shift+,` → **AI** tab.
 3. Set **Base URL** to: `http://localhost:3264/api`
 4. Set **API Key** to anything (e.g., `dummy-key`) — the server doesn't validate it
-5. Set **Model** to your preferred option (`qwen3-coder-plus` or `qwen3.7-max` recommended)
+5. Set **Model** to your preferred option (see provider-specific models below)
 6. Save. Zed Agent is now ready to use.
 
-=====================================================================
+### Qwen recommended models
+- `qwen3-coder-plus` — best for coding agent tasks
+- `qwen3.7-max` — most powerful, may occasionally ignore tool instructions on "dirty" accounts
 
-> **⚠️ Important:** In your chat.qwen.ai profile → Personalization — disable all toggles, set style to "Concise", and clear any saved memory.
+### DeepSeek models
+- `deepseek-v3` — fast (V4 Flash)
+- `deepseek-r1` — thinking/reasoning mode
+- `deepseek-expert` — expert mode (V4 Pro)
+- `deepseek-v4-pro` — expert + reasoning
 
-=====================================================================
-
-**Test:** Press `Cmd+L` to open the AI panel and ask any question about your code.
+> **⚠️ Qwen important:** In your chat.qwen.ai profile → Personalization — disable all toggles, set style to "Concise", and clear any saved memory.
 
 ## Tool Calling
 
 Zed Agent can invoke external tools using the standard OpenAI tool calling protocol: reading files, writing code, running terminal commands. The model decides which tools to call, invokes them through Zed, receives results, and continues working — all automatically (agent loop).
 
-**The challenge:** Qwen Chat's web API **does not accept tools** in standard OpenAI format (`"Tool X does not exists"`). ZApi works around this without quality loss:
+### Qwen (custom prompt injection)
+Qwen Chat's web API **does not accept tools** in standard OpenAI format. ZApi works around this:
 1. Tool schemas are injected into the user message as text instructions (prompt injection).
 2. Qwen generates tool calls as a JSON block within its normal text response.
-3. The proxy parses this block, strips extraneous text, and returns clean `tool_calls` to Zed Agent in OpenAI format.
+3. The proxy parses this block, strips extraneous text, and returns clean `tool_calls` to Zed Agent.
 
 Works reliably even with large tool lists thanks to schema compression (`MAX_SCHEMA_LEN=6000`) and built-in anti-loop guards.
 
+### DeepSeek (native OpenAI format)
+DeepSeek supports native `tools[]` parameter — the proxy simply passes them through. No JSON parsing or injection needed.
+
 ## Multi-Account & Rate Limits
 
-Free and basic Qwen accounts have per-minute/per-hour request limits. ZApi supports multiple accounts simultaneously:
-- `npm run auth -- --add` — add a new account.
-- When the current account hits its limit → the server automatically switches to the next available account (round-robin rotation).
-- Account statuses are tracked: `OK` / `WAIT` / `INVALID`.
+Free Qwen accounts have per-minute/per-hour request limits. ZApi supports multiple accounts:
+- `node scripts/auth.js` → menu options to add/list/remove accounts
+- When the current account hits its limit → server auto-switches to next available (round-robin)
+- Account statuses tracked: `OK` / `WAIT` / `INVALID`
+
+DeepSeek uses a single session per instance.
 
 ## Commands Reference
 
 | Command | Description |
 |---------|-------------|
-| `npm start` | Start the proxy server |
-| `npm run auth -- --add` | Add a new Qwen account (opens browser) |
-| `npm run auth -- --list` / `--remove` | View or remove saved accounts |
-| `npm run auth -- --relogin` | Refresh expired tokens without full re-setup |
-| `npm run models:sync` | Fetch the latest model list from Qwen Chat |
-| `npm run smoke` | Quick API health check (health + chat) |
+| `node index.js` | Start dispatcher — choose provider |
+| `node scripts/auth.js` | Qwen account management (add/list/remove/relogin) |
 | `npm test` | Run 46 unit tests (Node.js test runner, no browser) |
 | `npm run lint` / `format` | Code style checks (ESLint + Prettier) |
 
 ## Limitations & Caveats
 
-- **Unofficial proxy.** Qwen may change site structure or internal API URLs at any time. The project adapts to these changes, but you may need to pull updates from the repository.
-- **Stale personalization context.** If your Qwen account has accumulated many old conversations and personalization data, the model (especially `qwen3.7-max`) may occasionally ignore instructions and respond with plain text instead of tool calls. Clearing site cookies/cache in your browser or switching to `qwen3-coder-plus` resolves this instantly.
-- **Race condition ("in progress").** Qwen processes SSE sessions for a few seconds after delivering the full response. If you send the next request within milliseconds, the server returns `"chat is in progress"`. ZApi automatically pauses (~1-2s) and retries on the same chat to preserve conversation context (see docs).
-- **Browser memory.** During very long continuous sessions (>100 consecutive calls), Chromium consumes more RAM. The built-in garbage collector closes pages idle for more than 5 minutes, and a hard limit of 5 concurrent pages prevents OOM crashes. Automatic restart triggers when RSS exceeds 512 MB.
+- **Unofficial proxy.** Providers may change site structure or API URLs at any time.
+- **Qwen "dirty memory".** Old conversations and personalization data may cause the model to ignore tool instructions. Clear browser cookies or switch to `qwen3-coder-plus`.
+- **Race condition ("in progress").** Qwen processes SSE sessions for a few seconds after delivering the full response. ZApi auto-pauses (~1-2s) and retries on the same chat.
+- **Browser memory (Qwen).** During long sessions (>100 calls) Chromium consumes more RAM. Built-in GC closes idle pages after 5 minutes, hard limit of 5 concurrent pages, auto-restart at 512 MB RSS.
+- **DeepSeek read-only.** Can read files but not edit them yet.
 
 ## Developer Documentation
 
-Full technical documentation on architecture, module structure, and change history:
-
 - [docs/01_STATUS.md](docs/01_STATUS.md) — current system stability status
-- [docs/02_ARCHITECTURE.md](docs/02_ARCHITECTURE.md) — data flow diagrams (normal request vs agent-loop + race condition fix)
+- [docs/02_ARCHITECTURE.md](docs/02_ARCHITECTURE.md) — data flow diagrams (normal request vs agent-loop)
 - [docs/03_CODE_MAP.md](docs/03_CODE_MAP.md) — module map, key interfaces, and config constants
-- [docs/04_CHANGELOG.md](docs/04_CHANGELOG.md) — full development history (sessions 1–50)
+- [docs/04_CHANGELOG.md](docs/04_CHANGELOG.md) — full development history (sessions 1–67)
 - [docs/05_OPEN_QUESTIONS.md](docs/05_OPEN_QUESTIONS.md) — open issues, known quirks, and constraints
 
 ## Support the Author
