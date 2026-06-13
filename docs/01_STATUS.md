@@ -10,7 +10,7 @@ Process-level isolation via `index.js` dispatcher → `child_process.fork()`. Ea
 |------|--------|-------|
 | Multi-provider architecture | Working | `index.js` → forks Qwen/DeepSeek as isolated child processes with signal forwarding |
 | Tool calling (SSE + streaming) | Working | Qwen: prompt injection + JSON parse roundtrip via `toolUtils.js`. DeepSeek: native OpenAI tool_calls pass-through. |
-| Agent-loop stability | Working | Qwen: deferred auto-reset, cooldown, same-chat retry on "in progress". Anti-loop guard fixed: now scans ALL history via tool_call_id matching, covers non-streaming path. DeepSeek: N/A (single-message model). |
+| Agent-loop stability | Working | Qwen: deferred auto-reset, cooldown, same-chat retry on "in progress". Anti-loop guard: cross-turn repeat detection (tool_call_id matching) + anti-thinking-loop (>3 sequentialthinking). Covers both stream and non-stream paths. DeepSeek: N/A (single-message model). |
 | Chat management | Working | Qwen: layered fallback (chatIdMap → modelDefaultChats → create new). Cross-account auth fixed. DeepSeek: simple in-memory Map. |
 | Page pool memory (Qwen) | Mitigated | Pool size=3 idle, max 5 concurrent. Idle TTL 5min, GC every 60s, Memory Guard RSS restart at 512MB. |
 | Timeout enforcement | Active | `REQUEST_TIMEOUT_MINUTES` (5m) wrapper + protocolTimeout synced. Path 2 fetch timeout 20s. |

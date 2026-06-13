@@ -43,6 +43,7 @@ import {
   hasOpenAIToolState,
   prepareOpenAIMessageInput,
   getRepeatedToolCalls,
+  getExcessiveThinkingCalls,
 } from "./openaiUtils.js";
 
 // ─── Project Context (anti-hallucination) ───────────────────────────────────
@@ -499,6 +500,47 @@ router.post("/chat/completions", async (req, res) => {
             }
           }
 
+          // Anti-thinking-loop: sequentialthinking called too many times
+          if (toolCalls && toolCalls.length > 0) {
+            const excessiveThinking = getExcessiveThinkingCalls(toolCalls, messages);
+            if (excessiveThinking) {
+              logInfo(
+                `🧠 Thinking loop (stream): ${excessiveThinking.count} sequentialthinking calls — forcing stop`
+              );
+              const forceStop =
+                parts?.visible ||
+                "Стоп. Прекрати использовать sequentialthinking. Ты уже достаточно обдумал задачу. Переходи к использованию инструментов: read_file, list_directory, grep для сбора информации. Ответь списком инструментов в формате JSON tool_calls.";
+              writeSse({
+                id: "chatcmpl-stream",
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: mappedModel || "qwen-max-latest",
+                choices: [{ index: 0, delta: { content: forceStop }, finish_reason: null }],
+              });
+              writeSse({
+                id: "chatcmpl-stream",
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: mappedModel || "qwen-max-latest",
+                choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+              });
+              res.write("data: [DONE]\n\n");
+              res.end();
+
+              persistSessionState(
+                result,
+                qwenChatId,
+                isMeta,
+                effectiveChatId,
+                conversationScope,
+                mappedModel,
+                req,
+                effectiveParentId
+              );
+              return;
+            }
+          }
+
           if (toolCalls && toolCalls.length > 0) {
             logInfo(
               `🔨 Writing ${toolCalls.length} tool calls via SSE (${Array.isArray(parts?.visible) ? "text" : "json"} format)`
@@ -743,6 +785,37 @@ router.post("/chat/completions", async (req, res) => {
               {
                 index: 0,
                 message: { role: "assistant", content: fallbackContent },
+                finish_reason: "stop",
+              },
+            ],
+            usage: result.usage || {
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+            },
+            chatId: result.chatId,
+            parentId: result.parentId,
+          });
+        }
+
+        // Anti-thinking-loop: sequentialthinking called too many times
+        const excessiveThinking = getExcessiveThinkingCalls(toolCalls, messages);
+        if (excessiveThinking) {
+          logInfo(
+            `🧠 Thinking loop (non-stream): ${excessiveThinking.count} sequentialthinking calls — forcing stop`
+          );
+          const forceStop =
+            parts?.visible ||
+            "Стоп. Прекрати использовать sequentialthinking. Ты уже достаточно обдумал задачу. Переходи к использованию инструментов: read_file, list_directory, grep для сбора информации. Ответь списком инструментов в формате JSON tool_calls.";
+          return res.json({
+            id: result.id || "chatcmpl-" + Date.now(),
+            object: "chat.completion",
+            created: Math.floor(Date.now() / 1000),
+            model: mappedModel || "qwen-max-latest",
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: forceStop },
                 finish_reason: "stop",
               },
             ],

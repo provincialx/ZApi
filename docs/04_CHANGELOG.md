@@ -1,7 +1,9 @@
 # 04 — Changelog
 
-## Anti-loop detection fixed + cross-turn repeat guard (2026-06-14)
+## Anti-thinking-loop guard + cross-turn repeat fix (2026-06-14)
 
+- **`openaiUtils.js`** — Added `getExcessiveThinkingCalls()`: детектирует, когда модель вызывает `sequentialthinking` более 3 раз. Срабатывает даже с разным содержимым (не как `getRepeatedToolCalls`, которому нужно точное совпадение аргументов).
+- **`routes.js`** — Anti-thinking-loop гард в обоих путях (stream + non-stream). При >3 sequentialthinking — принудительный text response с инструкцией перейти к инструментам.
 - **`openaiUtils.js`** — Fixed `_allToolResultSignatures()` (was `_currentToolResultSignatures`):
   - **Баг: детекция повторов никогда не работала.** Tool-результаты от Zed не содержат поле `name`, только `tool_call_id`. Старая функция искала `msgs[i].name` → `undefined` → сигнатура `null` → анти-луп гард всегда пропускал повторы.
   - Заменил на матчинг по `tool_call_id` (из assistant.tool_calls → tool.tool_call_id), что гарантирует нахождение имени вызванной функции.

@@ -347,6 +347,37 @@ export function getRepeatedToolCalls(calls, messages) {
 }
 
 /**
+ * Detect excessive sequentialthinking calls — model stuck in thinking loop.
+ * Counts ALL sequentialthinking calls in history + new calls.
+ * Returns { count, calls } if total exceeds threshold, null otherwise.
+ */
+export function getExcessiveThinkingCalls(calls, messages, maxCount = 3) {
+  let thinkingCount = 0;
+  for (const msg of messages || []) {
+    if (msg?.role === "assistant" && msg?.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        const name = tc?.function?.name ?? tc?.name;
+        if (name === "sequentialthinking") thinkingCount++;
+      }
+    }
+  }
+
+  const newThinkingCalls = [];
+  for (const call of calls || []) {
+    const name = call?.function?.name ?? call?.name ?? null;
+    if (name === "sequentialthinking") {
+      newThinkingCalls.push(call);
+    }
+  }
+
+  if (newThinkingCalls.length > 0 && thinkingCount + newThinkingCalls.length > maxCount) {
+    return { count: thinkingCount + newThinkingCalls.length, calls: newThinkingCalls };
+  }
+
+  return null;
+}
+
+/**
  * Check if model is blocked after failed tool calls — continues calling tools
  * that already returned errors (e.g. "outside the project" on file operations).
  */
