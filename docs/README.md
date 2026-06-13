@@ -10,6 +10,16 @@
 
 > Source material: `../.agent-brief.md` — raw session log. Structured docs extracted from **67+ development sessions** across June 7–14, 2026.
 
+## Agent capabilities
+
+| Provider | Status         | Details                                                |
+| -------- | -------------- | ------------------------------------------------------ |
+| Qwen     | ✅ Full agent  | Tool calls, file read/write, agent-loop, SSE streaming |
+| DeepSeek | ⚠️ Read-only   | Can read files via tools, **cannot edit/write them**   |
+
+- **Qwen**: полноценный агент с tool calls, SSE streaming, agent-loop, ходит по кругу пока не выполнит задачу. Активно дорабатывается.
+- **DeepSeek**: пока что может только читать файлы через инструменты, но **не может их редактировать**. API позволяет, но integration требует доработки.
+
 ## Key architecture changes
 
 - **S53**: Aliyun WAF detection (CAPTCHA + Cloud WAF share resolver)
