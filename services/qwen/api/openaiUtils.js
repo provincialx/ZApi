@@ -249,6 +249,18 @@ export function isToolFailure(content) {
     /no such tool/i,
     /tool input was not fully received/i, // Zed Agent terminal truncation
     /arguments.*not.*received/i,
+    /missing required parameter/i, // MCP parameter validation error
+    /error:/i,
+    /failed:/i,
+    /unable to/i,
+    /could not/i,
+    /permission denied/i,
+    /bad request/i,
+    /unauthorized/i,
+    /forbidden/i,
+    /internal server error/i,
+    /invalid (tool|parameter|request|path)/i,
+    /not supported/i,
   ];
   return patterns.some((p) => p.test(content));
 }
@@ -261,6 +273,47 @@ function _makeCallSig(name, args) {
   const normalized = typeof args === "object" ? JSON.stringify(args) : String(args || "{}");
   return `${name}:${normalized.substring(0, 200)}`;
 }
+
+/** Destructive file operations can legitimately be repeated (e.g. recreate a file after deletion).
+ *  Anti-loop guard should only prevent repeated read-only/informational calls. */
+const NON_REPEATABLE_TOOLS = new Set([
+  "read_file",
+  "list_directory",
+  "find_path",
+  "grep",
+  "diagnostics",
+  "get_context_detail",
+  "get_recent_contexts",
+  "search_context",
+  "query",
+  "pg-schema",
+  "fetch",
+  "fetch_page_text",
+  "get_file_contents",
+  "get_commit",
+  "get_latest_release",
+  "get_release_by_tag",
+  "get_tag",
+  "list_commits",
+  "list_tags",
+  "list_releases",
+  "list_issues",
+  "list_pull_requests",
+  "search_issues",
+  "search_pull_requests",
+  "search_code",
+  "search_commits",
+  "search_repositories",
+  "search_users",
+  "issue_read",
+  "pull_request_read",
+  "get_team_members",
+  "get_teams",
+  "list_repository_collaborators",
+  "list_branches",
+  "list_sessions",
+  "get_session",
+]);
 
 /**
  * Collect tool result signatures from ALL turns in conversation history.
@@ -301,6 +354,11 @@ function _allToolResultSignatures(messages) {
       const tcId = msg.tool_call_id;
       const callInfo = callMap.get(tcId);
       if (callInfo) {
+        // Skip failed tool results — allows retrying destructive operations
+        // (delete_file, write_file, edit_file) after transient/MCP errors.
+        const content = stringifyOpenAIContent(msg.content);
+        if (isToolFailure(content)) continue;
+
         const sig = _makeCallSig(callInfo.name, callInfo.args);
         if (sig) allSigs.add(sig);
       } else {
@@ -329,6 +387,10 @@ export function getRepeatedToolCalls(calls, messages) {
   for (const call of calls || []) {
     const name = call?.function?.name ?? call?.name ?? null;
     if (!name) continue;
+
+    // Destructive/state-changing operations can legitimately be repeated.
+    // Only guard read-only/informational tools that provide no new state.
+    if (!NON_REPEATABLE_TOOLS.has(name)) continue;
 
     let argsObj;
     try {

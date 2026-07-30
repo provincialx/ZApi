@@ -1,5 +1,16 @@
 # 04 — Changelog
 
+## Anti-loop guard: allow retries after failed tool results (2026-07-30)
+
+- **`openaiUtils.js`** — `_allToolResultSignatures()` now skips failed tool results.
+  - Failed results (MCP errors, missing parameters, permission errors, etc.) are excluded from the anti-loop signature set.
+  - Allows retries of destructive operations (`delete_file`, `write_file`, `edit_file`) after transient or parameter errors.
+- **`openaiUtils.js`** — `getRepeatedToolCalls()` now only guards read-only/informational tools.
+  - Destructive/state-changing operations (`write_file`, `edit_file`, `delete_file`, `move_path`, `copy_path`, `terminal`, etc.) are excluded from repeat detection.
+  - Prevents false positives when user legitimately asks to recreate, modify, or delete files.
+- **`openaiUtils.js`** — Expanded `isToolFailure()` patterns: added `missing required parameter`, `error:`, `failed:`, `unable to`, `could not`, `permission denied`, `bad request`, `unauthorized`, `forbidden`, `internal server error`, `invalid (tool|parameter|request|path)`, `not supported`.
+- **`docs/01_STATUS.md`** — updated health notes: anti-loop guard now distinguishes successful calls from failed ones and excludes destructive operations from repeat detection.
+
 ## Anti-thinking-loop guard + cross-turn repeat fix (2026-06-14)
 
 - **`openaiUtils.js`** — Added `getExcessiveThinkingCalls()`: детектирует, когда модель вызывает `sequentialthinking` более 3 раз. Срабатывает даже с разным содержимым (не как `getRepeatedToolCalls`, которому нужно точное совпадение аргументов).

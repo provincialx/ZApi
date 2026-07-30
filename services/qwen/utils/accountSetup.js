@@ -124,7 +124,7 @@ export async function reloginAccountInteractive() {
 
   console.log("\nДоступные аккаунты:");
   tokens.forEach((t, idx) => {
-    const status = t.invalid ? " (Invalid)" : "";
+    let status = t.invalid ? " (Invalid)" : "";
     if (t.resetAt) status += ` (Cooldown until ${new Date(t.resetAt).toLocaleTimeString()})`;
     console.log(`${idx + 1} - ${t.id}${status}`);
   });

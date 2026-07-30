@@ -1525,10 +1525,12 @@ export async function createChatV2(
       return createChatV2(model, title, retryCount + 1, resolvedTokenObj);
     }
 
+    const bodySample = result.errorBody || (result.data ? JSON.stringify(result.data).slice(0, 500) : "(пустое тело)");
+    const statusText = result.status ? `HTTP ${result.status}` : "unknown";
+    logError(`Ошибка при создании чата: ${statusText} (попытка ${retryCount + 1}), body: ${bodySample}`);
     const cleanError = isTransient
       ? `Qwen API недоступен (${result.status}). Повторите позже.`
-      : result.errorBody || "Неизвестная ошибка";
-    logError(`Ошибка при создании чата: ${result.status || "unknown"} (попытка ${retryCount + 1})`);
+      : result.errorBody || (result.data?.message ? String(result.data.message) : "Неизвестная ошибка");
     return { error: cleanError };
   }
 
